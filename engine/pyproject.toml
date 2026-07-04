@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "m3diff"
+dynamic = ["version"]
+description = "Compare Infor M3 table exports across tenants and companies."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "m3diff authors" }]
+keywords = ["infor", "m3", "diff", "export", "cloudsuite"]
+
+# The core engine is stdlib-first — no runtime dependencies.
+dependencies = []
+
+[project.optional-dependencies]
+# Metadata Publisher schema refresh needs a pooled HTTP client for the
+# ~5,375-call bulk fetch (ADR-002/007). Kept out of the core so the diff
+# engine and CLI stay dependency-free.
+schema = ["httpx>=0.27"]
+dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.10"]
+
+[project.scripts]
+# Implemented in chunk 6; declared here so the entry point is stable.
+m3diff = "m3diff.cli:main"
+
+[tool.hatch.version]
+path = "src/m3diff/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/m3diff"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

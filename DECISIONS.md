@@ -1,0 +1,355 @@
+# DECISIONS.md — m3diff
+
+A running log of significant architecture and tooling decisions. Each entry is
+a lightweight ADR: the call, why, and when we'd revisit it. Appended the moment
+a decision is made, so the rationale is visible before it's questioned — not
+reconstructed after.
+
+Status values: **Proposed** (recommended, awaiting owner) · **Accepted** ·
+**Superseded by ADR-NNN**.
+
+---
+
+## ADR-001 — Desktop shell: Tauri over Electron
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (no spike). Revisit if a sidecar spike surfaces real
+  friction, or if WebView rendering variance on macOS/Linux stops being
+  acceptable.
+
+**Context.** Need a desktop shell wrapping a pure-Python diff engine. Windows
+is the priority target (spec §6.4); macOS/Linux are best-effort. The engine
+ships as a bundled subprocess regardless of shell.
+
+**Decision.** Tauri. The Python engine is bundled as a **PyInstaller sidecar**
+(`externalBin`, resolved per target-triple), and the shell talks to it over
+**NDJSON-over-stdio**, not localhost HTTP.
+
+**Rationale.**
+- WebView2 is guaranteed on Win11 — the main reason to prefer Electron
+  (deterministic bundled Chromium) is moot on our primary platform.
+- ~100–150 MB smaller installer (no bundled Chromium) for a utility app.
+- The Python sidecar pattern is first-class in Tauri; Electron's easier Node
+  integration buys nothing when the backend is Python either way.
+- We use zero Chromium-specific behavior (forms, tables, a diff viewer).
+- stdio transport keeps the backend **stdlib-only** (no FastAPI/uvicorn), opens
+  no port (no CORS, no port collisions, no firewall prompt), and ties the
+  process lifecycle to the sidecar.
+
+**Consequences.**
+- Accept WebView rendering variance on macOS/Linux (best-effort anyway).
+- NSIS installer embeds the WebView2 bootstrapper (`webviewInstallMode:
+  embedBootstrapper`) for rare fresh Windows images.
+- Chose to skip a comparative spike; confidence is high enough to build on it.
+
+---
+
+## ADR-002 — Metadata Publisher PK fetch: bulk, on explicit refresh, cached
+
+- **Date:** 2026-07-04
+- **Status:** Accepted; endpoint shape **confirmed 2026-07-04** (see
+  `METADATA-PUBLISHER-NOTES.md` and ADR-004). No blocking unknowns remain for
+  `schema/publisher.py`.
+
+**Context.** Diffing needs a primary key per table; the source of truth is the
+M3 Metadata Publisher (table index 00 = PK). Spec F17 requires a comparison to
+run fully offline once the schema is cached.
+
+**Decision.** Fetch schema in **bulk** via an explicit user-initiated "Refresh
+schema" action, cached in SQLite (`{table → columns, types, pk, fetched_at}`).
+**Never lazy-per-table during a compare.** Uncached tables fall back to a
+heuristic PK, marked `pk_source: "heuristic"` in the output.
+
+**Rationale.**
+- Offline-compare requirement: lazy-during-diff would couple every comparison
+  to the network and to `.ionapi` credentials, breaking F17.
+- Refresh is resumable via per-table `fetched_at`.
+- Credentials come from a user-supplied `.ionapi` path only — never stored in
+  app config, never logged.
+
+**Consequences (endpoint shape confirmed).**
+- Refresh = `GET /les/getTables` once (bulk, ~5,375 rows, prefix-filterable)
+  → `GET /les/getColumnsUsedByTable/{table}/{component}?langId=GB` per table.
+  The columns response carries each column's `dataType`, `length`, `decimals`,
+  `editCode`, and inline `indexes` membership — so the **PK is the columns
+  whose `indexes` contains `00`, in response order**. One call per table yields
+  columns *and* PK; no separate index pass on the hot path.
+- `GET /les/getIndexKeys/{table}00/{component}` is retained as **fallback only**
+  (table with no column reporting `00`); heuristic PK if that is empty too.
+- **Considered and rejected:** the bulk `/analytics/getTableColumns` (all
+  columns for all tables in one ~11 MB call). Its per-column key info is only
+  `keyCount` Y/N — no index-order — so it cannot yield PK ordering, and you'd
+  still need a per-table PK pass. Sherlock's per-table columns approach is
+  same-or-fewer calls with no giant stateful parse.
+- Per-table fetch (~5,375 calls) runs under a **bounded-concurrency pool** with
+  a pooled HTTP client; refresh stays resumable via per-table `fetched_at`.
+- Cache identity and MVX resolution split out to **ADR-004**; auth to
+  **ADR-007**. Offline-after-cache stands.
+
+---
+
+## ADR-003 — DIVI masking: drop-only, no value remap
+
+- **Date:** 2026-07-04
+- **Status:** **Superseded by ADR-010** (2026-07-04 — owner corrected:
+  divisions *are* renamed). Kept below for the record.
+
+**Context.** The PK-mask model supports two rule kinds: "drop from key" (CONO)
+and "remap value in key". The open question (spec §7.3) was whether divisions
+(DIVI) get *renamed* across companies in real migrations, which would force the
+remap path.
+
+**Decision.** Owner confirms divisions are **not** renamed between companies.
+DIVI masking is therefore a plain **"drop from key"** entry — identical
+treatment to CONO — with no remap table and no remap UI.
+
+**Rationale.** A division code means the same thing in both companies; only its
+presence in the key needs neutralizing so cross-company rows collide. Remap
+machinery would be dead weight.
+
+**Consequences.** v1.1 ships `pk_mask: ["CONO", "DIVI"]` as two drop entries.
+The mask-as-data abstraction still stands (cheap, keeps the door open if a
+future case ever needs remap), but no remap feature is built.
+
+---
+
+## ADR-004 — Schema cache identity: (component, table_name), MVX-preferred
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (from `METADATA-PUBLISHER-NOTES.md` §3; ratified by
+  Sherlock per the S4 rule — it touches domain semantics).
+
+**Context.** The Metadata Publisher list endpoint returns the same table name
+under multiple components — `CSYTAB` under both MVX and MJP, `CSYECT` under
+four. Export binary headers identify a table by **name only** (no component).
+A cache keyed on table name alone silently overwrites and diffs against the
+wrong component's schema.
+
+**Decision.** Key the schema cache on **(component, table_name)**. Refresh
+stores all components; lookup **prefers MVX** by default. When an export table
+name maps to more than one component, record `schema_component` and
+`component_ambiguous: true` in that table's diff result.
+
+**Rationale.** MVX is the standard M3 business/config component in nearly all
+cases; being explicit prevents a silent wrong-schema diff a user would trust.
+
+**Consequences.** `schema/cache.py` uses a composite key. The result contract
+gains `schema_component` + `component_ambiguous` (additive — see ADR-005). PK
+derivation reads index-`00` membership from the columns payload (ADR-002).
+
+---
+
+## ADR-005 — Result-JSON contract is code-owned and version-gated
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (Sherlock S1: "extend it — you own it now").
+
+**Context.** Spec §5 gives a starting result-JSON shape, not a locked schema.
+The design needs several fields §5 doesn't list (`pk_source`, `schema_match`,
+`cono_ambiguous`, `global_subset`, a modified-downgraded-to-hash flag, plus
+ADR-004's `schema_component`/`component_ambiguous`) — the "never silently
+lossy" markers. CLI/GUI byte-identical output and future AI-analysis both
+depend on the contract.
+
+**Decision.** `engine/src/m3diff/contract.py` (the dataclasses) is the **single
+source of truth**. TS types are generated from it; a schema-validation test
+enforces no drift. Spec §5 becomes descriptive docs that point at
+`contract.py`, not the reverse. **Additive** changes (new fields) are free;
+**breaking** changes (rename/remove/retype) require a `tool_version` bump and
+their own ADR.
+
+**Rationale.** Keeps freedom to evolve without ever silently breaking a
+consumer; the version envelope already exists (`tool_version`), so use it.
+
+**Consequences.** All five proposed additions land now. Contract changes are
+the class of decision Sherlock ratifies (ADR-009/S4 governance).
+
+---
+
+## ADR-006 — Config-scope preset: metadata category MF, no curated list
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (Sherlock S3 recommendation, owner-relayed).
+
+**Context.** Spec F4 defined the "Configuration tables" preset as `CSY*, C*`
+prefix globs — written before the MDP data was seen. Prefix globbing both
+over-includes (`CSYLOG`, `CSYFUG` are TF/WF noise) and under-includes (config
+tables outside `C*`).
+
+**Decision.** Default the config preset to **`tableCategory = MF`**
+(master/config) from MDP metadata. Keep prefix/custom globs available for
+manual scoping. **No hand-curated allow-list** — it rots the moment Infor adds
+tables. If MF proves too broad in practice, layer a small *exclude* list on top
+of the category, not a full curated allow-list.
+
+**Rationale.** Category is precise (cleanly separates MF/TF/WF) and
+self-maintaining. `tableCategory` is metadata (what a table *is*) and is
+orthogonal to our export-derived class (where its rows *live*) — show both.
+
+**Consequences.** Requires the schema cache populated to resolve categories;
+with no cache, fall back to prefix globs and flag the degraded scope.
+
+---
+
+## ADR-007 — Metadata Publisher auth in-house; no InforSDK dependency
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (implementation call per S4; flagged to owner because it
+  diverges from the reference projects and hinges on the publish-intent).
+
+**Context.** The reference projects authenticate via a private `infor-sdk`
+package (Azure DevOps feed, not PyPI) that reads the `.ionapi` and manages
+tokens. m3diff is intended to be a clean, publishable personal project
+(CLAUDE.md) and is stdlib-first.
+
+**Decision.** m3diff does **not** depend on InforSDK. It parses the standard
+`.ionapi` (`ci, cs, ti, saak, sask, pu, oa, ot, or, ev`) and performs the ION
+OAuth2 password-grant itself (`POST {pu}{ot}`), caches the bearer token in
+memory with JWT-`exp` minus skew, and calls `{gateway}/M3/mdprest/les/...`
+directly. Base-URL construction is ported (pattern only, no tenant values) from
+the reference's `get_auth_base`. One justified third-party dep allowed: a
+pooled HTTP client (`requests`/`httpx`) for the ~5,375-call refresh.
+
+**Rationale.** A private-feed dependency makes the project unpublishable and
+couples it to employer tooling. The OAuth flow is ~30 lines; no SDK-specific
+behavior is needed. The token grant and MDP calls are standard REST.
+
+**Consequences.** We own token refresh/expiry logic (small, testable). If the
+owner would rather not publish and prefers SDK expediency, this is the one call
+to revisit. Secret handling per ADR-008-adjacent B1 (owner posture pending).
+
+---
+
+## ADR-008 — Company enumeration: observed CONOs from the classify pass, CMNCMP for labels
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (Sherlock B2 design, owner-relayed).
+
+**Context.** F2/F3 need the companies present in an export for the mode picker.
+Scanning every COMPANY-class table just to enumerate CONOs is wasteful. The
+company master is `CMNCMP` (PK `JICONO` alone; `JITX40` description;
+`JICMTP` type; ~one row per company).
+
+**Decision.** Derive the **selectable** CONO set from the **union of CONO
+values actually observed during the classify pass** (already streaming every
+COMPANY/MIXED table — aggregating is nearly free). Use `CMNCMP` **when present**
+to *label* those numbers (`{JICONO → JITX40}`, e.g. "500 — Master Config"). If
+`CMNCMP` is absent (scoped export), keep the numbers unlabeled.
+
+**Rationale.** The question is "which CONOs actually have rows here," not "which
+companies are defined" — an export may list 6 companies in `CMNCMP` but contain
+data for only 2. Observed-from-classify is the true answer and robust to
+partial exports; `CMNCMP` is decoration, not the source of truth.
+
+**Consequences.** No dependency on `CMNCMP` being in scope. Labels are
+best-effort. Ties into the classify pass (`classify.py`) that already
+enumerates distinct CONOs per table.
+
+---
+
+## ADR-009 — `.ionapi` at-rest: stored file in `%APPDATA%/m3diff/`, locked-down ACL
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (owner chose option (a)).
+
+**Context.** The user uploads an `.ionapi`; it must persist across sessions so
+"Refresh schema" doesn't re-prompt. Because we parse the file ourselves
+(ADR-007), no SDK on-disk constraint applies — all postures were open. Owner
+chose (a).
+
+**Decision.** On upload, copy the `.ionapi` into the config-data root
+(`%APPDATA%/m3diff/`, `~/.m3diff/` elsewhere) as a single file with a
+**restrictive ACL** (current-user read only; 0600-equivalent). App settings
+store only the **path**, never the contents; the contents are never logged.
+The file lives outside `settings.json`, so spec §5's "never in app config"
+holds.
+
+**Rationale.** Simplest and most convenient; persists across sessions. The
+`.ionapi` is read **only** at schema-refresh time — a compare never touches it.
+
+**Consequences.** Secret at rest, mitigated by the ACL. DPAPI/Credential-Manager
+encryption (option (c)) is a future hardening follow-up. "Remove credentials"
+deletes the file.
+
+---
+
+## ADR-010 — DIVI masking: divisions ARE renamed → v1.1 remap (supersedes ADR-003)
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (owner-corrected). **Supersedes ADR-003.**
+
+**Context.** ADR-003 recorded "divisions not renamed → DIVI drop-only." On the
+direct either/or question ("do divisions get renamed when you stand up a new
+company, or stay the same?"), the owner answered **they get renamed** —
+reversing the earlier note. Flagged to the owner in case the reversal was a
+slip; treating the later pointed answer as authoritative.
+
+**Decision.** DIVI masking (v1.1) uses the **remap** rule kind, not drop: a
+user-supplied division mapping (company-A DIVI ↔ company-B DIVI) normalizes the
+DIVI key component before comparison. **v1 is unchanged — masks CONO only.**
+
+**Rationale.** If divisions are renamed, dropping DIVI would wrongly collide
+rows from different divisions, and a plain match would wrongly split the same
+logical division under two codes — either way, misleading diffs. Remap is
+required for correctness.
+
+**Consequences.** The mask-as-data abstraction (deliberately kept in ADR-003)
+now has its confirmed consumer. v1.1 adds a small remap UI + mapping input and a
+`pk_mask` entry `{column: "DIVI", kind: "remap", map: {…}}`. v1 scaffolding is
+unaffected.
+
+---
+
+## ADR-011 — Directory layout: `engine/` + `desktop/` monorepo
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (implementation call per S4; owner unblocked the choice).
+
+**Context.** Needed a repo topology; the owner delegated it (S4: layout is the
+implementer's call). Greenfield personal project — no upstream constraint.
+
+**Decision.** Single monorepo: **`engine/`** (Python package — diff engine, CLI,
+RPC; own `pyproject` + tests) and **`desktop/`** (Tauri shell + React UI), with
+`reference/` and `docs/` at root. `engine/` must **never** import up into
+`desktop/`; a CI check builds and tests `engine/` in isolation (S5).
+
+**Rationale.** The engine must build/test/ship independently; a monorepo
+versions it in lockstep with the shell without a submodule-or-publish dance for
+a one-maintainer, two-surface project.
+
+**Consequences.** The sidecar is built from `engine/`; the engine never
+references the shell.
+
+---
+
+## ADR-012 — Rust toolchain now; build the shell locally, defer packaging to Phase 7
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (owner-directed).
+
+**Context.** The Tauri shell needs Rust (MSVC toolchain on Windows). Probing the
+machine: **Visual Studio Community 2022 with the C++ (VC.Tools) workload is
+present**, so a local MSVC Rust build links. Owner directed: install Rust now,
+build and iterate the shell locally, and defer the Windows-installer packaging.
+
+**Decision.** Install `rustup` (stable-x86_64-pc-windows-msvc). Build and iterate
+the Tauri + React shell locally; **dev spawns the backend as
+`python -m m3diff.cli serve` with `PYTHONPATH → engine/src`** (no pip install —
+the engine is stdlib-only). Defer to a dedicated **Phase 7** on the designated
+shipping machine: the **PyInstaller sidecar** (`externalBin`) and the **Windows
+installer** (NSIS + embedded WebView2 bootstrapper).
+
+**Rationale.** The UI + Tauri wiring is platform-agnostic and the bulk of the
+work; packaging is machine-specific and lands wherever the release is cut.
+Spawning from source sidesteps the machine's broken pip index (a private Azure
+feed returning HTTP 402) for now.
+
+**Consequences.**
+- Confirmed working locally: `cargo build` (47s), frontend `tsc`+`vite`.
+- Release will swap the dev python-spawn for a bundled sidecar — **not wired
+  yet** (no sidecar binary exists until Phase 7).
+- **Open — confirm before Phase 7:** which machine cuts the release artifact.
+- The `.ionapi` at-rest storage (ADR-009) is a shell concern still to build.
+- **Follow-up:** the config preset in the shell uses prefix globs, not the
+  metadata `MF` category (ADR-006) — the category scope needs a schema-cache
+  lookup (a small engine addition) before the preset can honor ADR-006.

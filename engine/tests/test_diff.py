@@ -1,0 +1,310 @@
+"""Golden tests for the diff engine (spec §6.3)."""
+from __future__ import annotations
+
+import io
+import json
+import zipfile
+
+import pytest
+from fixtures.builder import build_export_zip, field
+
+from m3diff.contract import to_dict, to_json
+from m3diff.diff import CompareCancelled, CompareOptions, compare
+from m3diff.schema import Column, SchemaCache, TableSchema
+from m3diff.source import ZipExportSource
+
+# Columns reused across tests: mmcono (company), mmitno (item), mmitds (description).
+_MM = [field("mmcono", "4"), field("mmitno", maxlen="15"), field("mmitds", maxlen="30")]
+
+
+def _src(tables):
+    return ZipExportSource(io.BytesIO(build_export_zip(tables)))
+
+
+def _cache(table, pk_cols, all_cols, component="MVX"):
+    cache = SchemaCache()
+    columns = tuple(
+        Column(
+            name=name.upper(),  # metadata is uppercase; resolve_pk aligns to the export
+            data_type="String",
+            length=None,
+            decimals=None,
+            edit_code="",
+            indexes=("00",) if name in pk_cols else (),
+        )
+        for name in all_cols
+    )
+    cache.upsert_table(TableSchema(component, table, "MF", "desc", columns, "2026-07-04"))
+    return cache
+
+
+def _mm_cache():
+    return _cache("MITMAS", {"mmcono", "mmitno"}, ["mmcono", "mmitno", "mmitds"])
+
+
+def _compare(a_tables, b_tables=None, **options):
+    a = _src(a_tables)
+    b = _src(b_tables) if b_tables is not None else None
+    return compare(
+        a,
+        b,
+        CompareOptions(**options),
+        tool_version="0.1.0",
+        generated_at="2026-07-04T00:00:00Z",
+        a_label="a.zip",
+        b_label="b.zip",
+    )
+
+
+# --- membership -------------------------------------------------------------
+def test_identical():
+    tables = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "Widget"}])}
+    result = _compare(tables, tables, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache())
+    td = result.tables["MITMAS"]
+    assert td.status == "identical"
+    assert td.pk == ["mmcono", "mmitno"]
+    assert td.pk_source == "metadata"
+    assert td.schema_component == "MVX"
+    assert result.summary.identical == 1
+
+
+def test_added_row():
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    b = {"MITMAS": (_MM, [
+        {"mmcono": "100", "mmitno": "A", "mmitds": "W"},
+        {"mmcono": "100", "mmitno": "B", "mmitds": "G"},
+    ])}
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
+    assert td.status == "modified"
+    assert td.counts.added == 1 and td.counts.removed == 0 and td.counts.modified == 0
+    assert td.added[0].pk == ["B"]  # masked key = (mmitno,) with CONO dropped
+
+
+def test_removed_row():
+    a = {"MITMAS": (_MM, [
+        {"mmcono": "100", "mmitno": "A", "mmitds": "W"},
+        {"mmcono": "100", "mmitno": "B", "mmitds": "G"},
+    ])}
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
+    assert td.status == "modified"
+    assert td.counts.removed == 1
+    assert td.removed[0].pk == ["B"]
+
+
+def test_modified_field():
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "OLD"}])}
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "NEW"}])}
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
+    assert td.status == "modified"
+    assert td.counts.modified == 1
+    change = td.modified[0]
+    assert change.pk == ["A"]
+    assert change.changes["mmitds"].a == "OLD"
+    assert change.changes["mmitds"].b == "NEW"
+
+
+# --- CONO masking (the danger zone) -----------------------------------------
+def test_cono_masking_intra_identical():
+    rows = [
+        {"mmcono": "500", "mmitno": "A", "mmitds": "W"},
+        {"mmcono": "100", "mmitno": "A", "mmitds": "W"},
+    ]
+    result = _compare(
+        {"MITMAS": (_MM, rows)}, None, mode="intra", cono_a="500", cono_b="100", cache=_mm_cache()
+    )
+    assert result.tables["MITMAS"].status == "identical"
+    assert result.settings.pk_mask == ["CONO"]
+
+
+def test_cono_masking_intra_detects_drift():
+    rows = [
+        {"mmcono": "500", "mmitno": "A", "mmitds": "MASTER"},
+        {"mmcono": "100", "mmitno": "A", "mmitds": "DRIFTED"},
+    ]
+    td = _compare(
+        {"MITMAS": (_MM, rows)}, None, mode="intra", cono_a="500", cono_b="100", cache=_mm_cache()
+    ).tables["MITMAS"]
+    assert td.status == "modified"
+    assert td.modified[0].changes["mmitds"].a == "MASTER"
+    assert td.modified[0].changes["mmitds"].b == "DRIFTED"
+
+
+# --- null vs empty ----------------------------------------------------------
+def test_null_equals_empty_by_default():
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": ""}])}  # present, empty
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A"}])}  # absent (null)
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
+    assert td.status == "identical"
+
+
+def test_null_vs_empty_strict_mode():
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": ""}])}
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A"}])}
+    td = _compare(
+        a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache(), null_equals_empty=False
+    ).tables["MITMAS"]
+    assert td.status == "modified"
+    assert td.modified[0].changes["mmitds"].a == ""
+    assert td.modified[0].changes["mmitds"].b is None
+
+
+# --- ignore list ------------------------------------------------------------
+def test_ignored_timestamp_field_is_not_a_change():
+    fields = [field("mmcono", "4"), field("mmitno", maxlen="15"), field("mmlmdt", maxlen="8")]
+    a = {"MITMAS": (fields, [{"mmcono": "100", "mmitno": "A", "mmlmdt": "20260101"}])}
+    b = {"MITMAS": (fields, [{"mmcono": "100", "mmitno": "A", "mmlmdt": "20260704"}])}
+    cache = _cache("MITMAS", {"mmcono", "mmitno"}, ["mmcono", "mmitno", "mmlmdt"])
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=cache).tables["MITMAS"]
+    assert td.status == "identical"  # *lmdt is in the default ignore list
+
+
+# --- schema mismatch --------------------------------------------------------
+def test_schema_mismatch_compares_on_intersection():
+    fa = _MM
+    fb = _MM + [field("mmextr", maxlen="5")]
+    a = {"MITMAS": (fa, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    b = {"MITMAS": (fb, [{"mmcono": "100", "mmitno": "A", "mmitds": "W", "mmextr": "Z"}])}
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
+    assert td.schema_match is False
+    assert td.status == "identical"  # intersection matches; mmextr is not compared
+
+
+# --- error tolerance --------------------------------------------------------
+def test_corrupt_table_recorded_as_error_run_continues():
+    good = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    buffer = io.BytesIO(build_export_zip(good))
+    with zipfile.ZipFile(buffer, "a") as zf:
+        zf.writestr("BROKEN", b"\x00\x00\x00\x05short")  # header claims 5 bytes: undecodable
+    a = ZipExportSource(io.BytesIO(buffer.getvalue()))
+    b = _src(good)
+    result = compare(
+        a, b, CompareOptions(mode="inter", cono_a="100", cono_b="100"),
+        tool_version="0.1.0", generated_at="t", a_label="a", b_label="b",
+    )
+    assert result.tables["MITMAS"].status == "identical"
+    assert result.tables["BROKEN"].status == "error"
+    assert result.tables["BROKEN"].error
+    assert result.summary.errors == 1
+
+
+# --- NO_CONO ----------------------------------------------------------------
+def test_no_cono_table():
+    fields = [field("aaaa", maxlen="3"), field("bbbb", maxlen="3")]  # no ...cono column
+    a = {"CIDMAS": (fields, [{"aaaa": "1", "bbbb": "x"}])}
+    b = {"CIDMAS": (fields, [{"aaaa": "1", "bbbb": "y"}])}
+    cache = _cache("CIDMAS", {"aaaa"}, ["aaaa", "bbbb"])
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="200", cache=cache).tables["CIDMAS"]
+    assert td.table_class == "NO_CONO"
+    assert td.status == "modified"
+    assert td.modified[0].changes["bbbb"].a == "x"
+
+
+# --- global mode ------------------------------------------------------------
+def test_global_mode_uses_only_the_mixed_subset():
+    fields = [field("svcono", "4"), field("svsiid", maxlen="10"), field("svtx", maxlen="10")]
+    a = {"COSRVI": (fields, [
+        {"svsiid": "G1", "svtx": "AAA"},  # global (CONO absent)
+        {"svcono": "100", "svsiid": "C1", "svtx": "BBB"},  # company
+    ])}
+    b = {"COSRVI": (fields, [
+        {"svsiid": "G1", "svtx": "CHANGED"},  # global, drifted
+        {"svcono": "200", "svsiid": "C1", "svtx": "ZZZ"},  # company, other tenant
+    ])}
+    cache = _cache("COSRVI", {"svcono", "svsiid"}, ["svcono", "svsiid", "svtx"])
+    td = _compare(a, b, mode="global", cache=cache).tables["COSRVI"]
+    assert td.table_class == "MIXED"
+    assert td.global_subset is True
+    assert td.rows_a == 1 and td.rows_b == 1  # company rows excluded
+    assert td.status == "modified" and td.counts.modified == 1
+
+
+def test_global_mode_skips_pure_company_table():
+    fields = [field("mmcono", "4"), field("mmitno", maxlen="15")]
+    a = {"MITMAS": (fields, [{"mmcono": "100", "mmitno": "A"}])}
+    b = {"MITMAS": (fields, [{"mmcono": "200", "mmitno": "A"}])}
+    result = _compare(a, b, mode="global")
+    assert "MITMAS" not in result.tables
+
+
+# --- table present on one side ----------------------------------------------
+def test_table_missing_from_b():
+    a = {
+        "MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}]),
+        "OCUSMA": (_MM, [{"mmcono": "100", "mmitno": "X", "mmitds": "Cust"}]),
+    }
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    result = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache())
+    assert result.tables["OCUSMA"].status == "missing_in_b"
+    assert result.tables["OCUSMA"].counts.removed == 1
+    assert result.summary.missing_in_b == 1
+
+
+# --- caps and downgrade -----------------------------------------------------
+def test_embed_cap_sets_truncated():
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": f"I{i}", "mmitds": "OLD"} for i in range(5)])}
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": f"I{i}", "mmitds": "NEW"} for i in range(5)])}
+    td = _compare(
+        a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache(), max_rows_per_change=2
+    ).tables["MITMAS"]
+    assert td.counts.modified == 5
+    assert len(td.modified) == 2
+    assert td.truncated is True
+
+
+def test_hash_downgrade_drops_field_detail_but_keeps_counts():
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": f"I{i}", "mmitds": "OLD"} for i in range(5)])}
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": f"I{i}", "mmitds": "NEW"} for i in range(5)])}
+    td = _compare(
+        a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache(), hash_downgrade_threshold=2
+    ).tables["MITMAS"]
+    assert td.modified_detail is False
+    assert td.counts.modified == 5
+    assert td.modified[0].changes == {}  # no field-level detail once downgraded
+
+
+# --- heuristic fallback -----------------------------------------------------
+def test_heuristic_pk_degrades_to_set_membership():
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "OLD"}])}
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "NEW"}])}
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100").tables["MITMAS"]  # no cache
+    assert td.pk_source == "heuristic"
+    assert td.counts.modified == 0  # full-row identity: a change is add+remove
+    assert td.counts.added == 1 and td.counts.removed == 1
+
+
+# --- serialization ----------------------------------------------------------
+def test_compare_honors_cancellation():
+    tables = {
+        "AAA": (_MM, [{"mmcono": "100", "mmitno": "1", "mmitds": "x"}]),
+        "BBB": (_MM, [{"mmcono": "100", "mmitno": "2", "mmitds": "y"}]),
+    }
+    a = _src(tables)
+    with pytest.raises(CompareCancelled):
+        compare(a, None, CompareOptions(mode="intra", cono_a="100", cono_b="100"), cancelled=lambda: True)
+
+
+def test_compare_reports_progress_per_table():
+    tables = {
+        "AAA": (_MM, [{"mmcono": "100", "mmitno": "1"}]),
+        "BBB": (_MM, [{"mmcono": "100", "mmitno": "2"}]),
+    }
+    seen: list[tuple[int, int, str]] = []
+    compare(
+        _src(tables), None, CompareOptions(mode="intra", cono_a="100", cono_b="100"),
+        progress=lambda d, t, n: seen.append((d, t, n)),
+    )
+    assert seen == [(1, 2, "AAA"), (2, 2, "BBB")]
+
+
+def test_result_json_is_valid_and_deterministic():
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": n, "mmitds": "OLD"} for n in ("C", "A", "B")])}
+    b = {"MITMAS": (_MM, [])}
+    r1 = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache())
+    r2 = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache())
+    assert to_json(r1) == to_json(r2)  # deterministic
+    parsed = json.loads(to_json(r1))
+    assert parsed["mode"] == "inter"
+    assert parsed["tool_version"] == "0.1.0"
+    removed_pks = [entry["pk"] for entry in parsed["tables"]["MITMAS"]["removed"]]
+    assert removed_pks == sorted(removed_pks)  # change lists sorted by masked PK

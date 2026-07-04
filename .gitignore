@@ -1,0 +1,55 @@
+# === Secrets and real data — NEVER COMMIT ===
+*.ionapi
+fixtures/real/
+**/real-exports/
+*.zip
+
+# M3 export artifacts (raw table dumps have no extension; keep them out)
+# If you keep sample real exports locally, put them under fixtures/real/
+# (already ignored above). Generated test fixtures live elsewhere and are fine.
+
+# Local app data / caches
+.m3diff/
+*.db
+*.sqlite
+*.sqlite3
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# === Node / frontend ===
+node_modules/
+.vite/
+dist-ssr/
+*.local
+.eslintcache
+
+# === Tauri / Electron build output ===
+src-tauri/target/
+out/
+release/
+*.exe
+*.dmg
+*.AppImage
+*.msi
+*.deb
+
+# === Editor / OS ===
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
