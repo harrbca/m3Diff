@@ -10,23 +10,25 @@ Last updated: 2026-07-04, by Watson (Claude Code session)
 
 ## Current status (one-liner)
 
-**Desktop shell built and wired** — Tauri v2 + React over the RPC server, five
-views, both halves compile (cargo build 47s; tsc+vite clean). Rust 1.96.1
-installed (MSVC). Engine still 113 tests. Only packaging (Phase 7) and a live
-`tauri dev` smoke remain. See ADR-012.
+**Diff now runs table-parallel across processes** (ADR-013), serial-identical
+output, with in-process retry so one flaky worker can't sink a long run.
+Validated schema-keyed on real data: intra 100 vs 500, 11 metadata-keyed
+masters, **19.4s → 5.5s at 6 workers (~3.5×)**, byte-identical to serial. Engine
+now **126 tests**. Desktop shell still built (Tauri v2 + React, ADR-012); only
+packaging (Phase 7) and a live `tauri dev` smoke remain.
 
 ## Next up (the 1–3 things to do next)
 
-- [ ] **Investigate the segfault**: `compare --schema-db` on a huge table
-      (MITBAL, ~725k rows/company) SEGFAULTED on Python 3.14 — likely the
-      big-table hash-downgrade path in `diff.py`. Get a `faulthandler` traceback
-      and harden. **DEFERRED until the machine is confirmed healthy** (see the
-      stability note below — the machine spontaneously rebooted under load).
-- [ ] Parallelize the diff across cores — filed as task "Parallelize the diff
-      engine across tables" (task_28e44890).
 - [ ] Phase 7 packaging on the shipping machine (confirm which machine):
       PyInstaller sidecar + NSIS/WebView2. Also: run `npm run tauri dev` to
       click through the live UI; MF-category scope preset (ADR-006).
+- [ ] Optional: exercise the parallel path at larger scope once hardware is
+      trusted — a full-tenant all-tables all-cores sweep is deliberately NOT run
+      yet (it is the max-load scenario in the reboot history). Scale up
+      gradually (--workers modest, then higher) and watch Event Viewer.
+- [ ] (Closed) The MITBAL segfault is treated as **hardware** (flaky i9), per
+      owner — not chased further. The parallel path's in-process retry also
+      degrades gracefully if a worker dies mid-run (ADR-013).
 
 ---
 
@@ -81,6 +83,13 @@ Check items as they land. Each feature ships with tests (see spec §6.3).
 - [x] Result JSON per contract (`contract.py` is source of truth, ADR-005)
 - [x] Golden tests: identical/added/removed/modified/CONO-mask/null-vs-empty/
       schema-mismatch/error-tolerance/NO_CONO/global-subset/determinism
+- [x] **Table-parallel across processes (ADR-013):** `CompareOptions.workers` /
+      CLI `--workers` (1=serial default, 0=auto, N=force). Byte-identical to
+      serial (results reassembled in scoped order); gated on path-backed sources
+      + file cache so in-memory fixtures stay serial. In-process retry recovers
+      a glitched/dead worker. Tests: gate decisions, serial==parallel on-disk,
+      corrupt-table tolerance across the process boundary, cancellation, retry
+      seam (`test_parallel.py`, 12 tests).
 
 ### Phase 5 — CLI ✅ (schema refresh stubbed → 3b)
 - [x] `m3diff compare` (intra/inter/global) + scope filter, strict-null, no-mask-cono
@@ -131,6 +140,9 @@ Detail lives in `DECISIONS.md`; headlines here.
 - 2026-07-04 ADR-009 → .ionapi stored in `%APPDATA%/m3diff/`, ACL-locked (option a)
 - 2026-07-04 ADR-010 → DIVI **remap** in v1.1 (divisions are renamed); supersedes ADR-003
 - 2026-07-04 ADR-011 → directory layout = `engine/` + `desktop/` monorepo
+- 2026-07-04 ADR-012 → Rust toolchain now; build shell locally, defer packaging
+- 2026-07-04 ADR-013 → diff table-parallel across processes; serial-identical
+  output; in-process retry for flaky workers
 
 ## Open questions / blockers
 
@@ -169,7 +181,11 @@ Detail lives in `DECISIONS.md`; headlines here.
 - Other caveats: httpx is the `[schema]` extra; ruff/mypy not installed here.
 
 ### Session-end handoff (read this first in a fresh session)
-- **All committed, nothing lost.** Engine (114 tests) + desktop shell both build.
+- **All committed, nothing lost.** Engine (126 tests) + desktop shell both build.
+- **Diff is now table-parallel (ADR-013).** CLI `--workers` (0=auto default in
+  the CLI, 1=serial, N=force). Proven byte-identical to serial on real data and
+  ~3.5× at 6 workers on a scoped masters run. In-process retry means a flaky
+  worker (or a dead one) is re-run locally instead of aborting the whole compare.
 - **Schema cache BUILT:** `C:\Projects\m3Diff\schema.db`, 5,381 tables,
   MVX-preferred; PK resolution verified on real data (e.g. MITBAL →
   MBCONO/MBWHLO/MBITNO; CSYTAB resolves MVX, ambiguous). No need to re-download.
@@ -177,12 +193,14 @@ Detail lives in `DECISIONS.md`; headlines here.
   `pip.ini` (backup `pip.ini.bak` still holds the OLD PAT — user should delete
   it and **rotate that Azure PAT**, which was echoed to a terminal). httpx
   installed from PyPI.
-- **KNOWN BUG:** `compare --schema-db` on a huge table (MITBAL) segfaulted on
-  Python 3.14 (heuristic/no-schema full run is fine: 289s). Investigate the
-  big-table hash-downgrade path — but the **machine then rebooted under load**,
-  which a userspace segfault cannot cause, so suspect **hardware/RAM**. Do NOT
-  stress-test with big compares until the hardware is checked (Event Viewer:
-  WHEA-Logger / BugCheck / Kernel-Power 41; MemTest86). Validate the schema-keyed
-  path on a SMALL table instead.
+- **MITBAL segfault → treated as HARDWARE (owner call, 2026-07-04).** The flaky
+  i9 reboots under load — a userspace segfault can't cause that, so it's
+  hardware/RAM, not a `diff.py` bug. Not chased further. A one-off, unreproducible
+  worker `TypeError` (unpickling a result) was seen once during the parallel real
+  run and did not recur across repeated reruns — consistent with the same flaky
+  hardware; ADR-013's in-process retry absorbs exactly this. Still prudent before
+  a big all-cores sweep: check Event Viewer (WHEA-Logger / BugCheck / Kernel-Power
+  41) and run MemTest86. Schema-keyed path is now validated on real masters (see
+  above), not just a small table.
 - Real full-tenant export (gitignored) at `C:\Projects\m3Diff\fixtures\*.zip` —
   never commit it or leak its values.

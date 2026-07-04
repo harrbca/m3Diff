@@ -149,6 +149,7 @@ class RpcServer:
                 null_equals_empty=params.get("null_equals_empty", True),
                 mask_cono=params.get("mask_cono", True),
                 cache=cache,
+                workers=params.get("workers", 0),
             )
             result = compare(
                 a,

@@ -66,6 +66,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             null_equals_empty=not args.strict_null,
             mask_cono=not args.no_mask_cono,
             cache=cache,
+            workers=args.workers,
         )
         result = compare(
             a,
@@ -176,6 +177,9 @@ def _build_parser() -> argparse.ArgumentParser:
                            help="Treat null and empty string as different.")
     p_compare.add_argument("--no-mask-cono", dest="no_mask_cono", action="store_true",
                            help="Do not mask the CONO column in the key.")
+    p_compare.add_argument("--workers", type=int, default=0,
+                           help="Diff worker processes: 0 = auto/all cores (default), "
+                                "1 = serial, N = force N. Parallel needs file/dir inputs.")
     p_compare.add_argument("--generated-at", dest="generated_at",
                            help="ISO timestamp to stamp (default: now); set for reproducible output.")
     p_compare.set_defaults(func=_cmd_compare)

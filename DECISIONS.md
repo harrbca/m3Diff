@@ -353,3 +353,61 @@ feed returning HTTP 402) for now.
 - **Follow-up:** the config preset in the shell uses prefix globs, not the
   metadata `MF` category (ADR-006) — the category scope needs a schema-cache
   lookup (a small engine addition) before the preset can honor ADR-006.
+
+---
+
+## ADR-013 — Parallel diff: table-parallel across processes, serial-identical output
+
+- **Date:** 2026-07-04
+- **Status:** Accepted.
+
+**Context.** The diff is per-table independent but CPU-bound in pure Python
+(row decode, dict building, field compares) — threads can't help (GIL); only
+zlib/blake2b release it. Real tenants reach ~4,000 tables / ~2M rows, and a
+full serial `compare` runs minutes. Tables are the natural parallel unit.
+
+**Decision.** Fan tables out across a **`ProcessPoolExecutor`**. A worker
+re-opens the exports and (read-only) schema cache **once** in its initializer
+and keeps them in a module global; only **paths** cross the process boundary (a
+live `zipfile.ZipFile` / `sqlite3.Connection` is not picklable), and only an
+**already-truncated `TableDiff`** comes back (IPC never carries raw rows).
+Results are **reassembled in `scoped` order**, so the JSON is **byte-identical**
+to the serial path regardless of completion order (blake2b/`repr` are
+hash-seed-independent; each change list is sorted in `_build_table_diff`).
+
+Concurrency is a `CompareOptions.workers` field, surfaced as CLI `--workers`:
+**1 = serial (library default)**, **0 = auto** (all cores, engages only for
+≥`_MIN_PARALLEL_TABLES` file-backed tables), **N = force N** (honored down to 2
+tables). Parallel is gated on **re-openable (path-backed) sources + a
+file-backed cache**; in-memory `BytesIO`/`SchemaCache(":memory:")` fall back to
+serial — which is why the whole existing suite stays on the serial path
+untouched (its fixtures are all in-memory).
+
+**Rationale.**
+- Processes are the only way to get real speedup for GIL-bound Python work.
+- Path-based re-open keeps the pure-library `compare(ExportSource, …)` contract
+  intact while sidestepping unpicklable handles.
+- Serial default + capability gate means zero behavioral change for tests, the
+  determinism golden, and the CLI==GUI byte-identical guarantee.
+
+**Resilience (this machine is flaky — reboots under load, suspected RAM).** A
+worker can glitch (a one-off, non-reproducible `TypeError` was seen unpickling a
+result) or die outright (a broken pool then fails every pending future). Rather
+than lose a long compare, `_resolve_future` **re-runs just the failed table
+in-process** using the same `_diff_dispatch`. A *deterministic* bug fails again
+there and propagates; only a *transient* is absorbed, and output stays
+identical. A dead worker thus degrades that run to in-process for the remainder
+instead of aborting — useful given the segfault history on huge tables.
+
+**Consequences.**
+- Validated on real data (189 MB, intra 100 vs 500, 11 metadata-keyed masters):
+  **19.4s serial → 5.5s at 6 workers (~3.5×)**, byte-identical serial/parallel
+  and run-to-run. Schema PKs turn former add/remove noise into real field-level
+  diffs (e.g. MITAUN ~34k modified rows).
+- RPC/GUI accept an optional `workers` param (default auto), so the shell can
+  parallelize too; still gated the same way.
+- **Not exercised:** a full-tenant all-tables all-cores sweep — deliberately, as
+  that is the max-load scenario in the reboot history. Capability is proven at
+  scoped size; scale up deliberately once hardware is trusted.
+- **Windows `spawn`:** relies on the CLI/RPC being import-safe (`main()` guarded)
+  so children don't re-execute — verified.

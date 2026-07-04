@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import os
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass, field
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass, field, replace
 from typing import BinaryIO
 
 from . import __version__
@@ -39,7 +41,7 @@ from .format.types import ExportFormatError, Row, TableHeader
 from .format.reader import read_table
 from .pk import PrimaryKey, cono_column, masked_key, resolve_pk
 from .schema.cache import SchemaCache
-from .source import ExportSource
+from .source import ExportSource, open_export
 
 # Change-timestamp / bookkeeping fields that otherwise generate 100% noise (spec §3.3).
 DEFAULT_IGNORED_FIELDS: tuple[str, ...] = ("*lmdt", "*rgdt", "*rgtm", "*lmts", "*chno", "*chid")
@@ -47,6 +49,10 @@ DEFAULT_IGNORED_FIELDS: tuple[str, ...] = ("*lmdt", "*rgdt", "*rgtm", "*lmts", "
 MODE_INTRA = "intra"
 MODE_INTER = "inter"
 MODE_GLOBAL = "global"
+
+# Below this many in-scope tables the process-pool startup cost outweighs the
+# win, so ``workers=0`` (auto) stays serial. An explicit ``workers>1`` overrides.
+_MIN_PARALLEL_TABLES = 4
 
 
 class CompareCancelled(Exception):
@@ -65,6 +71,9 @@ class CompareOptions:
     cache: SchemaCache | None = None
     max_rows_per_change: int = 1000
     hash_downgrade_threshold: int = 200_000
+    # Diff worker processes. 1 = serial (default); 0 = auto (all cores, when the
+    # inputs are file-backed and there are enough tables); N>1 = force N.
+    workers: int = 1
 
 
 # --- scoping and CONO filtering ---------------------------------------------
@@ -355,6 +364,184 @@ def _summarize(tables: dict[str, TableDiff]) -> Summary:
     )
 
 
+def _diff_dispatch(
+    name: str,
+    a: ExportSource,
+    b_source: ExportSource,
+    a_names: set[str],
+    b_names: set[str],
+    options: CompareOptions,
+) -> TableDiff | None:
+    """Diff one table. Returns None when the table is skipped (global-mode COMPANY).
+
+    A parse error becomes an ``error`` TableDiff (spec F6); any other exception
+    propagates, so a real bug fails the run instead of being silently swallowed.
+    Shared verbatim by the serial and parallel drivers so both behave identically.
+    """
+    try:
+        if name in a_names and name in b_names:
+            return _diff_one(name, a, b_source, options)
+        if name in a_names:
+            return _one_sided(name, a, "a", options)
+        return _one_sided(name, b_source, "b", options)
+    except ExportFormatError as exc:
+        return _error_table(name, exc)
+
+
+def _compare_serial(
+    scoped: list[str],
+    a: ExportSource,
+    b_source: ExportSource,
+    a_names: set[str],
+    b_names: set[str],
+    options: CompareOptions,
+    total: int,
+    progress: Callable[[int, int, str], None] | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, TableDiff]:
+    tables: dict[str, TableDiff] = {}
+    for index, name in enumerate(scoped, start=1):
+        if cancelled is not None and cancelled():
+            raise CompareCancelled(f"cancelled after {index - 1}/{total} tables")
+        diff = _diff_dispatch(name, a, b_source, a_names, b_names, options)
+        if diff is not None:
+            tables[name] = diff
+        if progress is not None:
+            progress(index, total, name)
+    return tables
+
+
+# --- parallel driver --------------------------------------------------------
+# Each worker process re-opens the exports and (read-only) schema cache once, in
+# its initializer, and keeps them here. Only paths cross the process boundary —
+# a live zip handle or a SQLite connection is not picklable. What comes back is
+# an already-truncated TableDiff, so IPC never carries raw rows.
+_WORKER: dict[str, object] = {}
+
+
+def _init_worker(
+    a_origin: str, b_origin: str, cache_path: str | None, options: CompareOptions
+) -> None:  # pragma: no cover - runs in a child process
+    a_src = open_export(a_origin)
+    b_src = a_src if b_origin == a_origin else open_export(b_origin)
+    cache = SchemaCache(cache_path) if cache_path is not None else None
+    _WORKER["a"] = a_src
+    _WORKER["b"] = b_src
+    _WORKER["opt"] = replace(options, cache=cache)
+    _WORKER["a_names"] = set(a_src.table_names())
+    _WORKER["b_names"] = set(b_src.table_names())
+
+
+def _worker_one(name: str) -> TableDiff | None:  # pragma: no cover - runs in a child process
+    return _diff_dispatch(
+        name,
+        _WORKER["a"],  # type: ignore[arg-type]
+        _WORKER["b"],  # type: ignore[arg-type]
+        _WORKER["a_names"],  # type: ignore[arg-type]
+        _WORKER["b_names"],  # type: ignore[arg-type]
+        _WORKER["opt"],  # type: ignore[arg-type]
+    )
+
+
+def _resolve_future(
+    future: object,
+    name: str,
+    a: ExportSource,
+    b_source: ExportSource,
+    a_names: set[str],
+    b_names: set[str],
+    options: CompareOptions,
+) -> TableDiff | None:
+    """Take a worker's result, or re-run the table in-process if the worker failed.
+
+    This machine's hardware is flaky (transient worker glitches, and a worker can
+    die outright — a broken pool then fails every pending future). Rather than
+    lose the whole compare, re-run just that table in the main process. The retry
+    uses the exact same code, so a *deterministic* bug fails again here and
+    propagates; only a transient is absorbed, and the output stays identical.
+    """
+    try:
+        return future.result()  # type: ignore[attr-defined]
+    except Exception:
+        return _diff_dispatch(name, a, b_source, a_names, b_names, options)
+
+
+def _compare_parallel(
+    scoped: list[str],
+    a: ExportSource,
+    b_source: ExportSource,
+    a_names: set[str],
+    b_names: set[str],
+    options: CompareOptions,
+    workers: int,
+    total: int,
+    progress: Callable[[int, int, str], None] | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, TableDiff]:
+    a_origin = os.fspath(a.origin)  # type: ignore[arg-type]  # guarded by _resolve_workers
+    b_origin = os.fspath(b_source.origin)  # type: ignore[arg-type]
+    cache_path = options.cache.path if options.cache is not None else None
+    options_no_cache = replace(options, cache=None)  # the live cache is not picklable
+
+    results: dict[str, TableDiff] = {}
+    done = 0
+    executor = ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=_init_worker,
+        initargs=(a_origin, b_origin, cache_path, options_no_cache),
+    )
+    try:
+        futures = {executor.submit(_worker_one, name): name for name in scoped}
+        for future in as_completed(futures):
+            if cancelled is not None and cancelled():
+                raise CompareCancelled(f"cancelled after {done}/{total} tables")
+            name = futures[future]
+            diff = _resolve_future(future, name, a, b_source, a_names, b_names, options)
+            done += 1
+            if diff is not None:
+                results[name] = diff
+            if progress is not None:
+                progress(done, total, name)
+    finally:
+        # Never block on in-flight workers when unwinding (e.g. on cancel); drop
+        # any not-yet-started tasks. Normal completion already drained them all.
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    # Reassemble in scoped order so the JSON is byte-identical to the serial path,
+    # regardless of the order workers happened to finish in.
+    return {name: results[name] for name in scoped if name in results}
+
+
+def _reopenable(source: ExportSource) -> bool:
+    return getattr(source, "origin", None) is not None
+
+
+def _cache_shareable(cache: SchemaCache | None) -> bool:
+    """True if the cache can be re-opened in a worker (file-backed, not in-memory)."""
+    return cache is None or getattr(cache, "path", ":memory:") != ":memory:"
+
+
+def _resolve_workers(
+    options: CompareOptions, scoped_len: int, a: ExportSource, b_source: ExportSource
+) -> int:
+    """Decide the worker count, falling back to serial (1) when parallel can't apply.
+
+    Parallel needs re-openable (path-backed) sources and a shareable cache, since
+    workers rebuild both from paths. ``workers<=0`` is auto; it only engages past
+    ``_MIN_PARALLEL_TABLES``. An explicit ``workers>1`` is honored down to 2 tables.
+    """
+    if options.workers == 1 or scoped_len < 2:
+        return 1
+    if not (_reopenable(a) and _reopenable(b_source) and _cache_shareable(options.cache)):
+        return 1
+    cpu = os.cpu_count() or 1
+    if options.workers <= 0:  # auto
+        if cpu <= 1 or scoped_len < _MIN_PARALLEL_TABLES:
+            return 1
+        return min(cpu, scoped_len)
+    return min(options.workers, scoped_len)  # explicit override
+
+
 def compare(
     a: ExportSource,
     b: ExportSource | None,
@@ -370,7 +557,9 @@ def compare(
     """Compare two exports (or two companies within one) into a DiffResult.
 
     ``progress(done, total, table)`` is called after each table; ``cancelled()``
-    is polled before each table and, if it returns True, raises CompareCancelled.
+    is polled and, if it returns True, raises CompareCancelled. With more than one
+    worker the diff runs table-parallel across processes (see ``_resolve_workers``);
+    the result JSON is byte-identical to the serial path either way.
     """
     b_source = b if b is not None else a
     a_names = set(a.table_names())
@@ -378,23 +567,15 @@ def compare(
     scoped = _resolve_scope(options.tables, a_names | b_names)
     total = len(scoped)
 
-    tables: dict[str, TableDiff] = {}
-    for index, name in enumerate(scoped, start=1):
-        if cancelled is not None and cancelled():
-            raise CompareCancelled(f"cancelled after {index - 1}/{total} tables")
-        try:
-            if name in a_names and name in b_names:
-                diff = _diff_one(name, a, b_source, options)  # None => skipped in global mode
-            elif name in a_names:
-                diff = _one_sided(name, a, "a", options)
-            else:
-                diff = _one_sided(name, b_source, "b", options)
-        except ExportFormatError as exc:
-            diff = _error_table(name, exc)
-        if diff is not None:
-            tables[name] = diff
-        if progress is not None:
-            progress(index, total, name)
+    workers = _resolve_workers(options, total, a, b_source)
+    if workers > 1:
+        tables = _compare_parallel(
+            scoped, a, b_source, a_names, b_names, options, workers, total, progress, cancelled
+        )
+    else:
+        tables = _compare_serial(
+            scoped, a, b_source, a_names, b_names, options, total, progress, cancelled
+        )
 
     cono_a = None if options.mode == MODE_GLOBAL else options.cono_a
     cono_b = None if options.mode == MODE_GLOBAL else options.cono_b

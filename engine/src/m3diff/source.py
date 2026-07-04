@@ -28,6 +28,11 @@ def _is_table_info(name: str) -> bool:
 class ExportSource(ABC):
     """A set of named table streams plus an optional TABLE_INFO manifest."""
 
+    #: The path this source was opened from, or None if opened from an in-memory
+    #: stream. Path-backed sources can be re-opened inside a worker process (the
+    #: parallel diff needs this, since a live zip/dir handle is not picklable).
+    origin: Path | None = None
+
     @abstractmethod
     def table_names(self) -> list[str]:
         """Table names present, sorted, excluding TABLE_INFO."""
@@ -68,6 +73,7 @@ class ZipExportSource(ExportSource):
     """An export packaged as a zip. Accepts a path or an open binary file."""
 
     def __init__(self, file: str | os.PathLike[str] | BinaryIO) -> None:
+        self.origin = Path(file) if isinstance(file, (str, os.PathLike)) else None
         self._zip = zipfile.ZipFile(file)
         self._entries: dict[str, zipfile.ZipInfo] = {}
         self._table_info: str | None = None
@@ -107,6 +113,7 @@ class DirectoryExportSource(ExportSource):
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._dir = Path(path)
+        self.origin = self._dir
         self._files: dict[str, Path] = {}
         self._table_info: str | None = None
         for entry in sorted(self._dir.iterdir()):

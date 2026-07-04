@@ -46,7 +46,10 @@ class SchemaCache:
     """A local SQLite store of table schemas."""
 
     def __init__(self, path: str | os.PathLike[str] = ":memory:") -> None:
-        self._conn = sqlite3.connect(os.fspath(path) if not isinstance(path, str) else path)
+        #: The on-disk path (or ":memory:"). A file-backed cache can be re-opened
+        #: read-only inside a worker process; an in-memory one cannot be shared.
+        self.path = path if isinstance(path, str) else os.fspath(path)
+        self._conn = sqlite3.connect(self.path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA_DDL)
         self._conn.commit()
