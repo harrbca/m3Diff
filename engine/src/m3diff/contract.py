@@ -57,8 +57,15 @@ class TableDiff:
     global_subset: bool  # global mode: only the CONO-0 subset of a MIXED table
     modified_detail: bool  # False if downgraded to hash-only (huge table)
     # True when the metadata PK collided on this export's rows (a PK column
-    # blank on the wire) and the table fell back to full-row identity.
+    # blank on the wire). With pk_source "metadata" the per-key retry handled it
+    # (ADR-025; see ambiguous_keys) and clean keys kept field-level detail; with
+    # pk_source "heuristic" the whole table fell back to full-row identity
+    # (too large to hold per-key, or written by a pre-ADR-025 version).
     pk_degenerate: bool = False
+    # Distinct masked keys that had more than one row on a side (the ambiguous
+    # groups the per-key retry compared by full row). Non-zero only when
+    # pk_degenerate and pk_source == "metadata".
+    ambiguous_keys: int = 0
     # Maintaining program from the schema metadata (e.g. OCUSMA → "CRS610"),
     # None when unknown. Triage hint: where to fix a drifted table.
     maintained_by: str | None = None
@@ -149,6 +156,7 @@ def _table_to_dict(table: TableDiff) -> dict[str, Any]:
         "global_subset": table.global_subset,
         "modified_detail": table.modified_detail,
         "pk_degenerate": table.pk_degenerate,
+        "ambiguous_keys": table.ambiguous_keys,
         "maintained_by": table.maintained_by,
         "description": table.description,
         "column_descriptions": table.column_descriptions,
@@ -216,6 +224,7 @@ def _table_from_dict(d: dict[str, Any]) -> TableDiff:
         modified_detail=d["modified_detail"],
         # .get: additive fields absent from result JSON written by older versions
         pk_degenerate=d.get("pk_degenerate", False),
+        ambiguous_keys=d.get("ambiguous_keys", 0),
         maintained_by=d.get("maintained_by"),
         description=d.get("description"),
         column_descriptions=dict(d.get("column_descriptions") or {}),

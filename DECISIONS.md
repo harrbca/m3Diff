@@ -878,3 +878,53 @@ description as separate leading columns in the detail view.
   steps keep the old chrome.
 - CLI/engine untouched; the workspace is a pure re-skin over the same result
   JSON, so F14/F15 exports are unchanged.
+
+---
+
+## ADR-025 — Degenerate metadata PK: per-key retry instead of whole-table fallback
+
+- **Date:** 2026-07-05
+- **Status:** Accepted (additive contract change per ADR-005). Refines ADR-014;
+  ratified by owner (per-key option chosen over tolerance-threshold and
+  keep-as-is).
+
+**Context.** ADR-014 demotes a whole table to full-row identity on the first
+masked-key collision. On real data that blast radius is severe: CUGEX1 has
+30,410 rows in one company and exactly 10 colliding rows (blank ``F1FILE`` /
+``F1PK01`` — M3's own PK columns empty on the wire, rows distinguished only by
+a non-key field), yet the entire table lost field-level detail and rendered as
+``+28,355 −30,358 ~0``. MDP *does* define the PK (owner verified in Metadata
+Publisher); it is the data that fails it, and only barely. The same pattern
+covers CSYTAB, CSYSTS, CSYVIP and the rest of the generic/system tables.
+
+**Decision.** On ``_DegeneratePkError``, retry the table **per key**
+(``_diff_one_grouped``) instead of forcing whole-table heuristic identity:
+
+- Both sides are collected as ``masked key → [rows]``.
+- A key with exactly one row per side gets the normal field-level diff —
+  clean keys keep real "modified" detail.
+- An **ambiguous** key (>1 row on either side) is compared by set membership
+  within its group, matching rows on the **compared-columns signature** — so
+  ignored fields (change timestamps) cannot fabricate adds/removes there.
+- ``pk_source`` stays ``"metadata"`` (we are using the real PK);
+  ``pk_degenerate`` still flags the condition; a new additive
+  ``ambiguous_keys`` field counts the distinct ambiguous keys. The GUI shows
+  "metadata · <cols> — N ambiguous ⚠" and a flag explaining the split.
+- **Memory guard:** the grouped retry holds both sides, so it bails
+  (``_GroupedRetryTooLarge``) past ``hash_downgrade_threshold`` in-scope rows
+  per side and falls back to ADR-014's whole-table path (which has no field
+  detail at that size anyway — then ``pk_source: "heuristic"`` as before).
+
+**Consequences.**
+- CUGEX1 on real data: ``+28,355 −30,358 ~0`` → ``+61 −2,064 ~79`` with field
+  detail; 1 ambiguous key. CSYTAB keeps detail across 1,237 ambiguous keys.
+- Bonus correctness: CSYSTS's phantom ``+2 −2`` disappears — under full-row
+  identity the row key included *ignored* fields, so timestamp churn showed as
+  add+remove pairs; signature matching in ambiguous groups kills that class.
+  (True heuristic tables — no schema at all — still key on the full row
+  including ignored fields; unchanged from ADR-014.)
+- Determinism holds: groups collect in file order, group matching pops
+  deterministically, the final sort is stable — serial and parallel runs stay
+  byte-identical (covered by the existing parallel golden test).
+- Result JSON gains ``ambiguous_keys`` (additive; ``from_dict`` defaults 0).
+  TS types updated; suite 161 → 164.

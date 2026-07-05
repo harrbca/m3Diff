@@ -63,6 +63,7 @@ export interface TableDiff {
   global_subset: boolean;
   modified_detail: boolean;
   pk_degenerate: boolean;
+  ambiguous_keys: number;
   maintained_by: string | null;
   description: string | null;
   column_descriptions: Record<string, string>;

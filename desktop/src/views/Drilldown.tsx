@@ -145,7 +145,16 @@ export function Drilldown({ name, table, conoA, conoB, onClose }: Props) {
   if (!table.schema_match) flags.push({ t: "schemas differ — compared on the intersection" });
   if (table.global_subset) flags.push({ t: "global subset (CONO 0 only)" });
   if (!table.modified_detail) flags.push({ t: "large table — field detail dropped" });
-  if (table.pk_degenerate) flags.push({ t: "PK not unique in this export (blank key column) — compared by full row" });
+  if (table.pk_degenerate)
+    flags.push(
+      table.pk_source === "metadata"
+        ? {
+            t: `${table.ambiguous_keys.toLocaleString()} ambiguous PK key${
+              table.ambiguous_keys === 1 ? "" : "s"
+            } (blank key columns) — those rows compared by full row; all other rows keep field detail`,
+          }
+        : { t: "PK not unique in this export (blank key column) — whole table compared by full row" },
+    );
   if (table.truncated) flags.push({ t: "rows truncated — export for full detail" });
   if (table.error) flags.push({ t: `error: ${table.error}`, bad: true });
 

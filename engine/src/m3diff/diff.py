@@ -121,10 +121,15 @@ class _DegeneratePkError(Exception):
     """The metadata PK failed to uniquely key this export's rows.
 
     Happens when a PK column is blank on the wire (seen in the field: MITBAL
-    exports with ``mbwhlo`` empty), collapsing the masked key so distinct rows
-    collide. Keying on it would silently overwrite rows and produce a wrong
-    diff — the table is retried with full-row identity instead.
+    exports with ``mbwhlo`` empty; CUGEX1/CSYTAB rows with blank key columns),
+    collapsing the masked key so distinct rows collide. Keying on it would
+    silently overwrite rows and produce a wrong diff — the table is retried
+    per key (ADR-025), or with whole-table full-row identity when too large.
     """
+
+
+class _GroupedRetryTooLarge(Exception):
+    """The per-key retry would hold too many rows; use full-row identity."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,10 +300,16 @@ def _diff_one(name: str, a: ExportSource, b: ExportSource, opt: CompareOptions) 
         return _diff_one_pass(name, a, b, opt, force_heuristic=False)
     except _DegeneratePkError as exc:
         # The metadata PK collided on real rows (a PK column blank on the wire).
-        # Re-run this table on full-row identity — set-membership semantics that
-        # cannot silently drop rows or report a false "modified".
-        _log.info("table %s: degenerate metadata PK (%s); retrying with full-row identity", name, exc)
-        return _diff_one_pass(name, a, b, opt, force_heuristic=True)
+        # Retry per key (ADR-025): clean keys keep field-level detail; only the
+        # ambiguous key groups degrade to set membership. A table too large to
+        # hold both sides falls back to whole-table full-row identity, which
+        # has no field detail either way.
+        _log.info("table %s: degenerate metadata PK (%s); retrying per-key", name, exc)
+        try:
+            return _diff_one_grouped(name, a, b, opt)
+        except _GroupedRetryTooLarge:
+            _log.info("table %s: per-key retry over threshold; using full-row identity", name)
+            return _diff_one_pass(name, a, b, opt, force_heuristic=True)
 
 
 def _diff_one_pass(
@@ -383,6 +394,106 @@ def _diff_one_pass(
     )
 
 
+def _diff_one_grouped(name: str, a: ExportSource, b: ExportSource, opt: CompareOptions) -> TableDiff | None:
+    """Per-key retry for a degenerate metadata PK (ADR-025).
+
+    The metadata PK stays the row identity. A key selecting exactly one row per
+    side gets the normal field-level diff; an *ambiguous* key (more than one row
+    on a side — PK columns blank on the wire) is compared by set membership
+    within its group, matching rows on the compared-columns signature so
+    ignored fields cannot fabricate adds/removes. Only the ambiguous groups
+    lose "modified" detail, not the whole table.
+
+    Both sides' in-scope rows are held in memory (key → [rows]), so the retry
+    refuses tables beyond ``hash_downgrade_threshold`` rows per side
+    (_GroupedRetryTooLarge) — the caller then uses whole-table full-row
+    identity, which drops field detail past that size anyway.
+    """
+    with a.open_table(name) as stream_a, b.open_table(name) as stream_b:
+        header_a, rows_a_iter = read_table(stream_a)
+        header_b, rows_b_iter = read_table(stream_b)
+
+        cono_field_a = cono_column(header_a)
+        cono_field_b = cono_column(header_b)
+        pk = resolve_pk(name, header_a, opt.cache)  # metadata — it just collided
+        drop_a = frozenset({cono_field_a} - {None}) if opt.mask_cono else frozenset()
+        drop_b = frozenset({cono_field_b} - {None}) if opt.mask_cono else frozenset()
+
+        names_b = set(header_b.names)
+        schema_match = set(header_a.names) == names_b
+        cono_fields = frozenset({cono_field_a, cono_field_b} - {None})
+        compare_cols = [
+            c
+            for c in header_a.names
+            if c in names_b and not _ignored(c, opt.ignored_fields, cono_fields)
+        ]
+        limit = opt.hash_downgrade_threshold
+
+        def collect(rows, cono_field, target, drop):
+            groups: dict[tuple[str | None, ...], list[Row]] = {}
+            tally: Counter[str] = Counter()
+            in_scope = 0
+            for row in rows:
+                cono = cono_of_row(row, cono_field)
+                tally[cono] += 1
+                if not _in_scope(cono, cono_field, target, opt.mode):
+                    continue
+                in_scope += 1
+                if in_scope > limit:
+                    raise _GroupedRetryTooLarge(name)
+                groups.setdefault(masked_key(row, pk, drop), []).append(row)
+            return groups, tally, in_scope
+
+        groups_a, cono_tally, rows_a = collect(rows_a_iter, cono_field_a, opt.cono_a, drop_a)
+        table_class = _classify(cono_tally, cono_field_a, sum(cono_tally.values()))
+        if opt.mode == MODE_GLOBAL and table_class == "COMPANY":
+            return None
+        groups_b, _, rows_b = collect(rows_b_iter, cono_field_b, opt.cono_b, drop_b)
+
+    acc = _Accumulator()
+    ambiguous = 0
+    for key, group_a in groups_a.items():
+        group_b = groups_b.get(key)
+        if group_b is None:
+            if len(group_a) > 1:
+                ambiguous += 1
+            acc.removed.extend((key, row) for row in group_a)
+            continue
+        if len(group_a) == 1 and len(group_b) == 1:  # clean key: full field diff
+            changes = _field_diff(group_a[0], group_b[0], compare_cols, opt.null_equals_empty)
+            if changes:
+                acc.modified.append((key, changes))
+            continue
+        # Ambiguous group: multiset match on the compared-columns signature.
+        ambiguous += 1
+        unmatched: dict[bytes, list[Row]] = {}
+        for row in group_b:
+            unmatched.setdefault(_signature(row, compare_cols, opt.null_equals_empty), []).append(row)
+        for row in group_a:
+            sig = _signature(row, compare_cols, opt.null_equals_empty)
+            bucket = unmatched.get(sig)
+            if bucket:
+                bucket.pop()
+                if not bucket:
+                    del unmatched[sig]
+            else:
+                acc.removed.append((key, row))
+        for bucket in unmatched.values():
+            acc.added.extend((key, row) for row in bucket)
+    for key, group_b in groups_b.items():
+        if key in groups_a:
+            continue
+        if len(group_b) > 1:
+            ambiguous += 1
+        acc.added.extend((key, row) for row in group_b)
+
+    col_desc = {c: pk.column_descriptions[c] for c in compare_cols if c in pk.column_descriptions}
+    return _build_table_diff(
+        name, pk, header_a, table_class, schema_match, rows_a, rows_b, acc, False, opt,
+        pk_degenerate=True, ambiguous_keys=ambiguous, column_descriptions=col_desc,
+    )
+
+
 def _build_table_diff(
     name: str,
     pk: PrimaryKey,
@@ -396,6 +507,7 @@ def _build_table_diff(
     opt: CompareOptions,
     *,
     pk_degenerate: bool = False,
+    ambiguous_keys: int = 0,
     column_descriptions: dict[str, str] | None = None,
 ) -> TableDiff:
     acc.added.sort(key=lambda e: _pk_sort_key(e[0]))
@@ -445,6 +557,7 @@ def _build_table_diff(
         global_subset=(opt.mode == MODE_GLOBAL and table_class == "MIXED"),
         modified_detail=not downgraded,
         pk_degenerate=pk_degenerate,
+        ambiguous_keys=ambiguous_keys,
         error=None,
     )
 

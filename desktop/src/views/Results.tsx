@@ -259,7 +259,12 @@ export function ResultsView({ result }: Props) {
                   </td>
                   <td className="pkc">
                     {td.pk_source === "metadata" ? (
-                      <>metadata · {td.pk.join(", ")}</>
+                      <>
+                        metadata · {td.pk.join(", ")}
+                        {td.pk_degenerate && (
+                          <span className="warn"> — {td.ambiguous_keys.toLocaleString()} ambiguous ⚠</span>
+                        )}
+                      </>
                     ) : td.pk_source === "heuristic" ? (
                       <span className="warn">
                         heuristic ⚠ · {td.pk_degenerate ? "full row (degenerate PK)" : "full row"}

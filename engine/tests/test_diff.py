@@ -263,11 +263,12 @@ def test_hash_downgrade_drops_field_detail_but_keeps_counts():
     assert td.modified[0].changes == {}  # no field-level detail once downgraded
 
 
-# --- degenerate metadata PK (blank PK column on the wire) --------------------
-def test_degenerate_pk_side_a_falls_back_to_full_row_identity():
+# --- degenerate metadata PK (blank PK column on the wire, ADR-014/025) -------
+def test_degenerate_pk_ambiguous_group_degrades_to_set_membership():
     """Two A rows share a masked key (as when a PK column is blank on the wire):
-    keying on the metadata PK would silently overwrite one row, so the table
-    must fall back to full-row identity and say so."""
+    keying on the metadata PK would silently overwrite one row. The per-key
+    retry keeps the metadata PK and compares just that group by set membership
+    — the changed row is add+remove, never a false "modified"."""
     a = {"MITMAS": (_MM, [
         {"mmcono": "100", "mmitno": "A", "mmitds": "WH1"},
         {"mmcono": "100", "mmitno": "A", "mmitds": "WH2"},  # same masked key (A)
@@ -278,14 +279,56 @@ def test_degenerate_pk_side_a_falls_back_to_full_row_identity():
     ])}
     td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
     assert td.pk_degenerate is True
-    assert td.pk_source == "heuristic"
+    assert td.pk_source == "metadata"  # the PK is kept; only the group degrades
+    assert td.ambiguous_keys == 1
     assert td.rows_a == 2 and td.rows_b == 2  # no rows silently dropped
-    # set membership: the changed row is add+remove, never a false "modified"
     assert td.counts.modified == 0
     assert td.counts.added == 1 and td.counts.removed == 1
 
 
-def test_degenerate_pk_side_b_only_also_falls_back():
+def test_degenerate_pk_clean_keys_keep_field_level_detail():
+    """The point of the per-key retry: rows whose key IS unique still get real
+    field-level "modified" detail even when another key in the table collides."""
+    a = {"MITMAS": (_MM, [
+        {"mmcono": "100", "mmitno": "GOOD", "mmitds": "OLD"},
+        {"mmcono": "100", "mmitno": "", "mmitds": "X"},
+        {"mmcono": "100", "mmitno": "", "mmitds": "Y"},  # ambiguous key ("",)
+    ])}
+    b = {"MITMAS": (_MM, [
+        {"mmcono": "100", "mmitno": "GOOD", "mmitds": "NEW"},
+        {"mmcono": "100", "mmitno": "", "mmitds": "X"},
+        {"mmcono": "100", "mmitno": "", "mmitds": "Z"},
+    ])}
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
+    assert td.pk_source == "metadata" and td.pk_degenerate is True
+    assert td.ambiguous_keys == 1
+    # clean key GOOD: a real modified with field detail
+    assert td.counts.modified == 1
+    assert td.modified[0].changes["mmitds"].a == "OLD"
+    assert td.modified[0].changes["mmitds"].b == "NEW"
+    # ambiguous key "": Y removed, Z added, X matched silently
+    assert td.counts.added == 1 and td.counts.removed == 1
+    assert td.modified_detail is True
+
+
+def test_degenerate_pk_ambiguous_group_respects_ignored_fields():
+    """Rows in an ambiguous group match on the compared-columns signature, so a
+    difference only in an ignored field (change timestamps) is not a change."""
+    cols = _MM + [field("mmlmdt", maxlen="10")]  # *lmdt is in DEFAULT_IGNORED_FIELDS
+    a = {"MITMAS": (cols, [
+        {"mmcono": "100", "mmitno": "", "mmitds": "X", "mmlmdt": "20260101"},
+        {"mmcono": "100", "mmitno": "", "mmitds": "Y", "mmlmdt": "20260101"},
+    ])}
+    b = {"MITMAS": (cols, [
+        {"mmcono": "100", "mmitno": "", "mmitds": "X", "mmlmdt": "20260704"},
+        {"mmcono": "100", "mmitno": "", "mmitds": "Y", "mmlmdt": "20260704"},
+    ])}
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
+    assert td.pk_degenerate is True and td.ambiguous_keys == 1
+    assert td.status == "identical"  # only ignored fields differ
+
+
+def test_degenerate_pk_side_b_only_also_retries_per_key():
     a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
     b = {"MITMAS": (_MM, [
         {"mmcono": "100", "mmitno": "A", "mmitds": "W"},
@@ -293,7 +336,22 @@ def test_degenerate_pk_side_b_only_also_falls_back():
     ])}
     td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
     assert td.pk_degenerate is True
+    assert td.pk_source == "metadata" and td.ambiguous_keys == 1
     assert td.counts.added == 1  # the extra B row is an add, not an overwrite
+
+
+def test_degenerate_pk_over_threshold_falls_back_to_full_row_identity():
+    """A degenerate table too large for the per-key retry keeps ADR-014's
+    whole-table full-row fallback (field detail is lost past that size anyway)."""
+    a = {"MITMAS": (_MM, [
+        {"mmcono": "100", "mmitno": "", "mmitds": f"R{i}"} for i in range(4)
+    ])}
+    td = _compare(a, a, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache(),
+                  hash_downgrade_threshold=3).tables["MITMAS"]
+    assert td.pk_degenerate is True
+    assert td.pk_source == "heuristic"  # whole-table fallback, not per-key
+    assert td.ambiguous_keys == 0
+    assert td.status == "identical"
 
 
 def test_unique_metadata_pk_is_not_flagged_degenerate():
@@ -404,11 +462,11 @@ def test_degenerate_pk_intra_mode_cono_collision():
 
 
 def test_degenerate_pk_preserves_schema_description_and_column_descriptions():
-    """A degenerate metadata PK falls back to full-row identity, but must keep the
-    schema-derived metadata — description and column descriptions (ADR-022/023).
-    Regression: the fallback used to rebuild the PK from scratch and drop them."""
+    """A degenerate metadata PK must keep the schema-derived metadata —
+    description and column descriptions (ADR-022/023) — through the retry.
+    Regression: the old whole-table fallback rebuilt the PK and dropped them."""
     # mmitno blank in both rows → the masked PK collapses to the same key → the
-    # metadata PK degenerates and the table retries on full-row identity.
+    # metadata PK degenerates and the table retries per key (ADR-025).
     a = {"MITMAS": (_MM, [
         {"mmcono": "100", "mmitno": "", "mmitds": "X"},
         {"mmcono": "100", "mmitno": "", "mmitds": "Y"},
@@ -418,10 +476,11 @@ def test_degenerate_pk_preserves_schema_description_and_column_descriptions():
         {"mmcono": "100", "mmitno": "", "mmitds": "Z"},
     ])}
     td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_desc_cache()).tables["MITMAS"]
-    assert td.pk_degenerate is True and td.pk_source == "heuristic"
+    assert td.pk_degenerate is True and td.pk_source == "metadata"
+    assert td.ambiguous_keys == 1
     assert td.description == "MF: Item master"
     assert td.column_descriptions == {"mmitds": "Item description"}
-    assert td.status == "modified"  # full-row identity: the changed row is add+remove
+    assert td.status == "modified"  # ambiguous group: the changed row is add+remove
 
 
 # --- heuristic fallback -----------------------------------------------------
@@ -530,11 +589,12 @@ def test_from_dict_tolerates_older_json_without_additive_fields():
 
     tables = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
     d = to_dict(_compare(tables, tables, mode="inter", cono_a="100", cono_b="100"))
-    for td in d["tables"].values():  # simulate a result written before ADR-014/017/023
+    for td in d["tables"].values():  # simulate a result written before ADR-014/017/023/025
         del td["pk_degenerate"]
         del td["maintained_by"]
         del td["column_descriptions"]
+        del td["ambiguous_keys"]
     rebuilt = from_dict(d)
     td = rebuilt.tables["MITMAS"]
     assert td.pk_degenerate is False and td.maintained_by is None
-    assert td.column_descriptions == {}
+    assert td.column_descriptions == {} and td.ambiguous_keys == 0
