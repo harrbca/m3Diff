@@ -5,4 +5,4 @@ this package; both produce identical result JSON. See the repository-root
 PLAN.md and DECISIONS.md for design and rationale.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

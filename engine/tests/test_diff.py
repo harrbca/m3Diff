@@ -6,10 +6,11 @@ import json
 import zipfile
 
 import pytest
-from fixtures.builder import build_export_zip, field
+from fixtures.builder import build_export_zip, encode_table, field
 
 from m3diff.contract import to_dict, to_json
-from m3diff.diff import CompareCancelled, CompareOptions, compare
+from m3diff.diff import CompareCancelled, CompareOptions, _values_equal, compare
+from m3diff.format import read_table
 from m3diff.schema import Column, SchemaCache, TableSchema
 from m3diff.source import ZipExportSource
 
@@ -131,21 +132,33 @@ def test_cono_masking_intra_detects_drift():
 
 
 # --- null vs empty ----------------------------------------------------------
-def test_null_equals_empty_by_default():
-    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": ""}])}  # present, empty
-    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A"}])}  # absent (null)
+# Post-ADR-026 a decoded row never contains "" — a present zero-length string is
+# a carry marker, decompressed away, and a genuine blank is bitmap-absent. So the
+# present-empty-vs-absent wire distinction no longer exists; the null_equals_empty
+# toggle only bridges None vs a literal "" from a hypothetical future writer or a
+# raw (decompress=False) side. Exercise that at the value-comparison level, and
+# cover the still-reachable "real value vs absent" case end-to-end.
+def test_null_equals_empty_bridges_none_and_blank_at_value_level():
+    assert _values_equal(None, "", null_equals_empty=True) is True
+    assert _values_equal("", None, null_equals_empty=True) is True
+    assert _values_equal(None, None, null_equals_empty=True) is True
+    assert _values_equal("W", None, null_equals_empty=True) is False  # real value != absent
+
+
+def test_null_vs_empty_strict_mode_distinguishes_them_at_value_level():
+    assert _values_equal(None, "", null_equals_empty=False) is False
+    assert _values_equal("", "", null_equals_empty=False) is True
+    assert _values_equal("W", "W", null_equals_empty=False) is True
+
+
+def test_field_present_on_one_side_absent_on_other_is_a_change():
+    # The remaining null case a real export produces: a field present with a value
+    # on one side, absent (bitmap-clear) on the other.
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A"}])}  # mmitds absent
     td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
-    assert td.status == "identical"
-
-
-def test_null_vs_empty_strict_mode():
-    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": ""}])}
-    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A"}])}
-    td = _compare(
-        a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache(), null_equals_empty=False
-    ).tables["MITMAS"]
     assert td.status == "modified"
-    assert td.modified[0].changes["mmitds"].a == ""
+    assert td.modified[0].changes["mmitds"].a == "W"
     assert td.modified[0].changes["mmitds"].b is None
 
 
@@ -263,9 +276,13 @@ def test_hash_downgrade_drops_field_detail_but_keeps_counts():
     assert td.modified[0].changes == {}  # no field-level detail once downgraded
 
 
-# --- degenerate metadata PK (blank PK column on the wire, ADR-014/025) -------
+# --- degenerate metadata PK (genuine duplicate PK values, ADR-014/025/026) ---
+# NB: since ADR-026 a *blank* string PK column on the wire is a carry marker,
+# decompressed away — it no longer degenerates a PK. What still can is metadata
+# that declares a PK which does not uniquely key the rows: distinct rows share
+# the same (non-blank) PK values. These tests use a genuine duplicate value.
 def test_degenerate_pk_ambiguous_group_degrades_to_set_membership():
-    """Two A rows share a masked key (as when a PK column is blank on the wire):
+    """Two A rows share a masked key (the metadata PK does not uniquely key them):
     keying on the metadata PK would silently overwrite one row. The per-key
     retry keeps the metadata PK and compares just that group by set membership
     — the changed row is add+remove, never a false "modified"."""
@@ -291,13 +308,13 @@ def test_degenerate_pk_clean_keys_keep_field_level_detail():
     field-level "modified" detail even when another key in the table collides."""
     a = {"MITMAS": (_MM, [
         {"mmcono": "100", "mmitno": "GOOD", "mmitds": "OLD"},
-        {"mmcono": "100", "mmitno": "", "mmitds": "X"},
-        {"mmcono": "100", "mmitno": "", "mmitds": "Y"},  # ambiguous key ("",)
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "X"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "Y"},  # duplicate key ("DUP",)
     ])}
     b = {"MITMAS": (_MM, [
         {"mmcono": "100", "mmitno": "GOOD", "mmitds": "NEW"},
-        {"mmcono": "100", "mmitno": "", "mmitds": "X"},
-        {"mmcono": "100", "mmitno": "", "mmitds": "Z"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "X"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "Z"},
     ])}
     td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
     assert td.pk_source == "metadata" and td.pk_degenerate is True
@@ -306,7 +323,7 @@ def test_degenerate_pk_clean_keys_keep_field_level_detail():
     assert td.counts.modified == 1
     assert td.modified[0].changes["mmitds"].a == "OLD"
     assert td.modified[0].changes["mmitds"].b == "NEW"
-    # ambiguous key "": Y removed, Z added, X matched silently
+    # ambiguous key "DUP": Y removed, Z added, X matched silently
     assert td.counts.added == 1 and td.counts.removed == 1
     assert td.modified_detail is True
 
@@ -316,12 +333,12 @@ def test_degenerate_pk_ambiguous_group_respects_ignored_fields():
     difference only in an ignored field (change timestamps) is not a change."""
     cols = _MM + [field("mmlmdt", maxlen="10")]  # *lmdt is in DEFAULT_IGNORED_FIELDS
     a = {"MITMAS": (cols, [
-        {"mmcono": "100", "mmitno": "", "mmitds": "X", "mmlmdt": "20260101"},
-        {"mmcono": "100", "mmitno": "", "mmitds": "Y", "mmlmdt": "20260101"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "X", "mmlmdt": "20260101"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "Y", "mmlmdt": "20260101"},
     ])}
     b = {"MITMAS": (cols, [
-        {"mmcono": "100", "mmitno": "", "mmitds": "X", "mmlmdt": "20260704"},
-        {"mmcono": "100", "mmitno": "", "mmitds": "Y", "mmlmdt": "20260704"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "X", "mmlmdt": "20260704"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "Y", "mmlmdt": "20260704"},
     ])}
     td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
     assert td.pk_degenerate is True and td.ambiguous_keys == 1
@@ -344,7 +361,7 @@ def test_degenerate_pk_over_threshold_falls_back_to_full_row_identity():
     """A degenerate table too large for the per-key retry keeps ADR-014's
     whole-table full-row fallback (field detail is lost past that size anyway)."""
     a = {"MITMAS": (_MM, [
-        {"mmcono": "100", "mmitno": "", "mmitds": f"R{i}"} for i in range(4)
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": f"R{i}"} for i in range(4)
     ])}
     td = _compare(a, a, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache(),
                   hash_downgrade_threshold=3).tables["MITMAS"]
@@ -359,6 +376,86 @@ def test_unique_metadata_pk_is_not_flagged_degenerate():
     td = _compare(tables, tables, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
     assert td.pk_degenerate is False
     assert td.pk_source == "metadata"
+
+
+# --- carry-forward compression composed with the diff (ADR-026 golden) -------
+# MITBAL-shaped: a multi-column PK (cono, itno, whlo) where one PK column carries
+# down runs on the wire, exactly the real-export pattern that used to degenerate.
+_MB = [field("mbcono", "4"), field("mbitno", maxlen="15"), field("mbwhlo", maxlen="5")]
+
+
+def _mb_cache():
+    return _cache("MITBAL", {"mbcono", "mbitno", "mbwhlo"}, ["mbcono", "mbitno", "mbwhlo"])
+
+
+def test_carry_forward_crossing_cono_boundary_masks_to_identical():
+    """The single easiest thing to get subtly wrong, now in two ways: company B's
+    first row carries string values from company A's last row (compression is
+    positional and does NOT reset at the CONO boundary). With CONO masked, the
+    intra diff of A vs B is identical — decompression and masking compose."""
+    rows = [
+        {"mmcono": "500", "mmitno": "ITEM", "mmitds": "Widget"},   # company 500
+        {"mmcono": "100", "mmitno": "ITEM", "mmitds": "Widget"},   # 100: itno+itds carried across CONO
+    ]
+    # Guard: the fixture really put carry markers on company 100's row.
+    raw = list(read_table(io.BytesIO(encode_table(_MM, rows, compress=True)), decompress=False)[1])
+    assert raw[1]["mmitno"] == "" and raw[1]["mmitds"] == ""
+
+    a = ZipExportSource(io.BytesIO(build_export_zip({"MITMAS": (_MM, rows)}, compress=True)))
+    td = compare(
+        a, None, CompareOptions(mode="intra", cono_a="500", cono_b="100", cache=_mm_cache()),
+        tool_version="0.1.0", generated_at="t",
+    ).tables["MITMAS"]
+    assert td.status == "identical"
+    assert (td.counts.added, td.counts.removed, td.counts.modified) == (0, 0, 0)
+
+
+def test_compressed_pk_column_no_longer_degenerates():
+    """A PK column (whlo) carries down runs. Read literally the markers collapse
+    (itno, whlo) keys and the metadata PK looks degenerate; decompression restores
+    the distinct warehouses so the PK keys cleanly (pk_degenerate False)."""
+    rows = [
+        {"mbcono": "100", "mbitno": "IT1", "mbwhlo": "WHA"},
+        {"mbcono": "100", "mbitno": "IT2", "mbwhlo": "WHA"},  # whlo carried (WHA run)
+        {"mbcono": "100", "mbitno": "IT1", "mbwhlo": "WHB"},
+        {"mbcono": "100", "mbitno": "IT2", "mbwhlo": "WHB"},  # whlo carried (WHB run)
+    ]
+    # Guard: whlo really carried on rows 2 and 4 — read raw these collapse to
+    # (IT2,'') twice, the false degenerate PK the reader fix eliminates.
+    raw = list(read_table(io.BytesIO(encode_table(_MB, rows, compress=True)), decompress=False)[1])
+    assert raw[1]["mbwhlo"] == "" and raw[3]["mbwhlo"] == ""
+
+    zbytes = build_export_zip({"MITBAL": (_MB, rows)}, compress=True)
+    td = compare(
+        ZipExportSource(io.BytesIO(zbytes)), ZipExportSource(io.BytesIO(zbytes)),
+        CompareOptions(mode="inter", cono_a="100", cono_b="100", cache=_mb_cache()),
+        tool_version="0.1.0", generated_at="t",
+    ).tables["MITBAL"]
+    assert td.pk_degenerate is False
+    assert td.ambiguous_keys == 0
+    assert td.pk_source == "metadata"
+    assert td.status == "identical"
+
+
+def test_same_data_different_compression_is_identical():
+    """Side A uncompressed, side B carry-forward compressed: same logical rows,
+    so the diff is identical (the reader decompresses B before comparing)."""
+    rows = [
+        {"mmcono": "100", "mmitno": "A", "mmitds": "Widget"},
+        {"mmcono": "100", "mmitno": "B", "mmitds": "Widget"},  # itds repeats -> compresses on side B
+    ]
+    # Guard: side B really compressed mmitds on its second row.
+    raw = list(read_table(io.BytesIO(encode_table(_MM, rows, compress=True)), decompress=False)[1])
+    assert raw[1]["mmitds"] == ""
+
+    a = ZipExportSource(io.BytesIO(build_export_zip({"MITMAS": (_MM, rows)}, compress=False)))
+    b = ZipExportSource(io.BytesIO(build_export_zip({"MITMAS": (_MM, rows)}, compress=True)))
+    td = compare(
+        a, b, CompareOptions(mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()),
+        tool_version="0.1.0", generated_at="t",
+    ).tables["MITMAS"]
+    assert td.status == "identical"
+    assert (td.counts.added, td.counts.removed, td.counts.modified) == (0, 0, 0)
 
 
 # --- maintaining program (maintained_by) --------------------------------------
@@ -465,15 +562,15 @@ def test_degenerate_pk_preserves_schema_description_and_column_descriptions():
     """A degenerate metadata PK must keep the schema-derived metadata —
     description and column descriptions (ADR-022/023) — through the retry.
     Regression: the old whole-table fallback rebuilt the PK and dropped them."""
-    # mmitno blank in both rows → the masked PK collapses to the same key → the
-    # metadata PK degenerates and the table retries per key (ADR-025).
+    # mmitno duplicated in both rows → the masked PK collapses to the same key →
+    # the metadata PK degenerates and the table retries per key (ADR-025).
     a = {"MITMAS": (_MM, [
-        {"mmcono": "100", "mmitno": "", "mmitds": "X"},
-        {"mmcono": "100", "mmitno": "", "mmitds": "Y"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "X"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "Y"},
     ])}
     b = {"MITMAS": (_MM, [
-        {"mmcono": "100", "mmitno": "", "mmitds": "X"},
-        {"mmcono": "100", "mmitno": "", "mmitds": "Z"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "X"},
+        {"mmcono": "100", "mmitno": "DUP", "mmitds": "Z"},
     ])}
     td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_desc_cache()).tables["MITMAS"]
     assert td.pk_degenerate is True and td.pk_source == "metadata"

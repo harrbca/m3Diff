@@ -1,9 +1,15 @@
 """Core types and errors for the binary M3 export format (spec §2).
 
 A decoded row is a plain ``dict[str, str]`` holding **only the fields present**
-in that row's null bitmap. A field absent from the dict is null/default; a field
-mapped to ``""`` is a present, zero-length value. The format distinguishes these
-two states on the wire, so we keep them distinct here — see spec §2.1.
+in that row's null bitmap. A field absent from the dict is null/default.
+
+String columns are **carry-forward compressed** on the wire (spec §2.1,
+ADR-026): a column present in a row's bitmap with a **zero-length value means
+"same value as this column's last present value"**, not an empty string. The
+reader decompresses this transparently, so a decoded row **never contains
+``""``** — a genuine blank is bitmap-absent instead. A zero-length value in a
+non-string column, or with no prior value to carry, is a format violation
+(``CompressionError``).
 """
 from __future__ import annotations
 
@@ -11,6 +17,11 @@ from dataclasses import dataclass
 
 # A decoded row: present fields only. Missing key == null/absent.
 Row = dict[str, str]
+
+# JDBC SQL type codes for string columns — the only columns that carry-forward
+# compress (spec §2.1). VARCHAR (12) is what real headers use; CHAR (1) is
+# included defensively (never observed, but would be a string type).
+STRING_TYPE_CODES = frozenset({1, 12})
 
 
 class ExportFormatError(Exception):
@@ -34,6 +45,18 @@ class RowLengthError(ExportFormatError):
 
     The per-row length prefix is the format's built-in checksum (spec §2.1);
     a mismatch means the bytes are corrupt or misaligned.
+    """
+
+
+class CompressionError(ExportFormatError):
+    """A carry-forward marker (present zero-length value) is invalid (ADR-026).
+
+    Raised when a zero-length string value appears in a **non-string column**
+    (numerics never compress), or with **no prior value to carry** (an orphan
+    marker, e.g. on a column's first present occurrence). Like the row-length
+    invariant this is treated as a checksum: a violation raises rather than
+    being silently absorbed, so a future writer changing the semantics surfaces
+    as a loud per-table ``error`` (spec F6) instead of a silently wrong diff.
     """
 
 
@@ -85,6 +108,16 @@ class TableHeader:
     @property
     def names(self) -> tuple[str, ...]:
         return tuple(f.name for f in self.fields)
+
+    @property
+    def string_field_flags(self) -> tuple[bool, ...]:
+        """Per-column mask: True where the column is string-typed (CHAR/VARCHAR).
+
+        Only string columns carry-forward compress (spec §2.1). Consulted per
+        cell in the reader's hot loop, so bind it **once per stream** and index
+        the local — do not re-read it per row.
+        """
+        return tuple(f.type_code in STRING_TYPE_CODES for f in self.fields)
 
     def cono_field_indexes(self) -> list[int]:
         """Indexes of columns that look like the company column.

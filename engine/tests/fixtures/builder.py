@@ -2,9 +2,22 @@
 
 Everything the tests need is generated here from the format spec (§2), so no
 real M3 data ever enters the repo (CLAUDE.md). ``encode_table`` is the exact
-inverse of ``m3diff.format.reader``; ``encode_table_info`` emits a faithful
-``java.io.ObjectOutputStream`` encoding of ``ArrayList<TableInfo>`` so the
-TABLE_INFO deserializer can be round-tripped.
+inverse of ``m3diff.format.reader`` in both modes:
+
+- ``compress=False`` (default): each present value is written verbatim. Well-
+  formed fixtures use ``None`` for blanks (bitmap-absent) and must contain **no
+  ``""`` string values** — on the wire a present zero-length string is a
+  carry-forward marker, so a literal ``""`` decodes to something else (or an
+  error) through the decompressing reader (ADR-026).
+- ``compress=True``: string columns are carry-forward compressed — a value equal
+  to that column's last present value is emitted as a present zero-length cell.
+  Such fixtures round-trip through the (decompressing) reader to their original
+  logical rows.
+
+``encode_row`` stays raw and permissive so tests can hand-craft wire-level
+violations (orphan ``''``, ``''`` in a numeric column, ``''`` on the first row).
+``encode_table_info`` emits a faithful ``java.io.ObjectOutputStream`` encoding of
+``ArrayList<TableInfo>`` so the TABLE_INFO deserializer can be round-tripped.
 """
 from __future__ import annotations
 
@@ -13,7 +26,7 @@ import struct
 import zipfile
 from collections.abc import Mapping, Sequence
 
-from m3diff.format.types import Field
+from m3diff.format.types import STRING_TYPE_CODES, Field
 
 _U32 = struct.Struct(">I")
 
@@ -56,10 +69,62 @@ def encode_row(fields: Sequence[Field], values: RowSpec) -> bytes:
     return _U32.pack(len(payload)) + payload
 
 
-def encode_table(fields: Sequence[Field], rows: Sequence[RowSpec]) -> bytes:
+def _encode_row_compressed(
+    fields: Sequence[Field],
+    values: RowSpec,
+    carry: list["str | None"],
+    string_flags: Sequence[bool],
+) -> bytes:
+    """Encode one row, carry-forward compressing string columns (ADR-026).
+
+    ``carry`` holds each column's last present value and is mutated in place
+    across the table. A present string value equal to its carry is written as a
+    zero-length cell (the marker); anything else is written verbatim and updates
+    the carry. Absent (``None``) leaves the carry untouched, mirroring the reader.
+    """
+    names = {f.name for f in fields}
+    unknown = set(values) - names
+    if unknown:
+        raise ValueError(f"values reference unknown columns: {sorted(unknown)}")
+
+    nfields = len(fields)
+    bitmap = bytearray((nfields + 7) // 8)
+    body = bytearray()
+    for i, f in enumerate(fields):
+        value = values.get(f.name)
+        if value is None:
+            continue  # absent from bitmap => null; carry untouched (rule 2)
+        if string_flags[i] and value == "":
+            # A literal empty string is not representable when compressing: on the
+            # wire a zero-length string IS the carry marker. Real blanks are absent.
+            raise ValueError(
+                f"compressed fixture cannot hold a literal empty string for "
+                f"column {f.name!r}; use None (bitmap-absent) for a blank"
+            )
+        bitmap[i >> 3] |= 0x80 >> (i & 7)
+        if string_flags[i] and carry[i] is not None and value == carry[i]:
+            body += _U32.pack(0)  # same as last present value => carry marker
+        else:
+            encoded = value.encode("utf-8")
+            body += _U32.pack(len(encoded)) + encoded
+            carry[i] = value
+
+    payload = bytes(bitmap) + bytes(body)
+    return _U32.pack(len(payload)) + payload
+
+
+def encode_table(
+    fields: Sequence[Field], rows: Sequence[RowSpec], *, compress: bool = False
+) -> bytes:
     out = bytearray(encode_header(fields))
+    if not compress:
+        for row in rows:
+            out += encode_row(fields, row)
+        return bytes(out)
+    string_flags = [f.type_code in STRING_TYPE_CODES for f in fields]
+    carry: list[str | None] = [None] * len(fields)
     for row in rows:
-        out += encode_row(fields, row)
+        out += _encode_row_compressed(fields, row, carry, string_flags)
     return bytes(out)
 
 
@@ -133,13 +198,15 @@ def build_export_zip(
     tables: Mapping[str, tuple[Sequence[Field], Sequence[RowSpec]]],
     *,
     table_info: bool = True,
+    compress: bool = False,
 ) -> bytes:
     """Build a zip: one entry per table (filename = table name, no extension),
-    plus a TABLE_INFO catalog unless disabled."""
+    plus a TABLE_INFO catalog unless disabled. ``compress`` applies carry-forward
+    string compression (ADR-026) to every table's rows."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, (fields, rows) in tables.items():
-            zf.writestr(name, encode_table(fields, rows))
+            zf.writestr(name, encode_table(fields, rows, compress=compress))
         if table_info:
             entries = [(name, len(rows)) for name, (fields, rows) in tables.items()]
             zf.writestr("TABLE_INFO", encode_table_info(entries))

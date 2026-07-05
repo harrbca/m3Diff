@@ -6,9 +6,10 @@ import struct
 import zipfile
 
 import pytest
-from fixtures.builder import build_export_zip, encode_header, encode_table, field
+from fixtures.builder import build_export_zip, encode_header, encode_row, encode_table, field
 
 from m3diff.format import (
+    CompressionError,
     HeaderError,
     RowLengthError,
     TableHeader,
@@ -21,6 +22,22 @@ from m3diff.format import (
 def _roundtrip(fields, rows):
     header, rows_iter = read_table(io.BytesIO(encode_table(fields, rows)))
     return header, list(rows_iter)
+
+
+def _raw_table(fields, raw_rows):
+    """Assemble a table stream from hand-crafted rows. A value of ``""`` places a
+    present zero-length cell on the wire (a carry-forward marker), which the
+    normal builder path never emits — so carry semantics are exercised directly.
+    """
+    out = bytearray(encode_header(fields))
+    for values in raw_rows:
+        out += encode_row(fields, values)
+    return bytes(out)
+
+
+def _read_raw(fields, raw_rows, **kw):
+    header, rows_iter = read_table(io.BytesIO(_raw_table(fields, raw_rows)), **kw)
+    return list(rows_iter)
 
 
 def test_header_and_simple_rows():
@@ -36,13 +53,99 @@ def test_header_and_simple_rows():
     assert got == rows
 
 
-def test_null_vs_empty_string_are_distinct():
+# --- carry-forward string decompression (ADR-026) ---------------------------
+def test_carry_forward_repeats_last_present_value():
+    fields = [field("k"), field("v")]
+    # v on the wire: A '' '' '' -> decodes to A A A A (k varies to keep rows apart)
+    got = _read_raw(fields, [
+        {"k": "1", "v": "A"},
+        {"k": "2", "v": ""},
+        {"k": "3", "v": ""},
+        {"k": "4", "v": ""},
+    ])
+    assert [r["v"] for r in got] == ["A", "A", "A", "A"]
+
+
+def test_carry_forward_updates_on_each_new_value():
+    fields = [field("k"), field("v")]
+    # v on the wire: A '' C '' -> A A C C (the carry updates when a value is present)
+    got = _read_raw(fields, [
+        {"k": "1", "v": "A"},
+        {"k": "2", "v": ""},
+        {"k": "3", "v": "C"},
+        {"k": "4", "v": ""},
+    ])
+    assert [r["v"] for r in got] == ["A", "A", "C", "C"]
+
+
+def test_carry_survives_rows_where_the_column_is_absent():
+    fields = [field("k"), field("v")]
+    # v: present A, then absent (bitmap-clear), then '' -> A, absent, A.
+    got = _read_raw(fields, [
+        {"k": "1", "v": "A"},
+        {"k": "2"},           # v absent from the bitmap
+        {"k": "3", "v": ""},  # carry marker: repeats the last *present* value
+    ])
+    assert got[0]["v"] == "A"
+    assert "v" not in got[1]   # absent stays absent — carry is not materialized here
+    assert got[2]["v"] == "A"  # carry survived the gap (rule 2: last present value)
+
+
+def test_columns_compress_independently():
     fields = [field("a"), field("b"), field("c")]
-    # b is a present zero-length value; c is omitted (null).
-    header, got = _roundtrip(fields, [{"a": "x", "b": ""}])
-    assert got[0] == {"a": "x", "b": ""}
-    assert got[0]["b"] == ""  # empty string preserved as a present value
-    assert "c" not in got[0]  # null => absent from the present-only row
+    got = _read_raw(fields, [
+        {"a": "X", "b": "Y", "c": "Z"},
+        {"a": "", "b": "Q", "c": ""},   # a,c carried; b new
+        {"a": "", "b": "", "c": "Z2"},  # a,b carried; c new
+    ])
+    assert got == [
+        {"a": "X", "b": "Y", "c": "Z"},
+        {"a": "X", "b": "Q", "c": "Z"},
+        {"a": "X", "b": "Q", "c": "Z2"},
+    ]
+
+
+def test_orphan_carry_on_first_row_raises():
+    fields = [field("a"), field("b")]
+    with pytest.raises(CompressionError):
+        _read_raw(fields, [{"a": "X", "b": ""}])  # b '' with nothing to carry
+
+
+def test_orphan_carry_after_only_absent_rows_raises():
+    fields = [field("a"), field("b")]
+    with pytest.raises(CompressionError):
+        _read_raw(fields, [
+            {"a": "1"},            # b absent, never present
+            {"a": "2", "b": ""},   # b '' but no prior present value
+        ])
+
+
+def test_zero_length_in_non_string_column_raises():
+    fields = [field("n", "4"), field("v")]  # n is INTEGER (type 4)
+    with pytest.raises(CompressionError):
+        _read_raw(fields, [
+            {"n": "5", "v": "A"},
+            {"n": "", "v": "B"},   # '' in a non-string column is a format violation
+        ])
+
+
+def test_decompress_false_returns_raw_carry_markers():
+    fields = [field("k"), field("v")]
+    got = _read_raw(fields, [
+        {"k": "1", "v": "A"},
+        {"k": "2", "v": ""},
+    ], decompress=False)
+    assert got[1]["v"] == ""  # the raw diagnostic path preserves the marker verbatim
+
+
+def test_decompressed_rows_never_contain_empty_string():
+    fields = [field("a"), field("b"), field("c")]
+    got = _read_raw(fields, [
+        {"a": "P", "b": "Q", "c": "R"},
+        {"a": "", "b": "", "c": ""},
+        {"a": "P2", "b": "", "c": "R"},
+    ])
+    assert all(v != "" for r in got for v in r.values())
 
 
 def test_absent_cono_stays_absent():

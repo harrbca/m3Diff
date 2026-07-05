@@ -4,6 +4,7 @@ from __future__ import annotations
 from .reader import iter_cono_values, iter_rows, read_header, read_table
 from .tableinfo import TableInfoEntry, TableInfoError, parse_table_info
 from .types import (
+    CompressionError,
     ExportFormatError,
     Field,
     HeaderError,
@@ -21,6 +22,7 @@ __all__ = [
     "HeaderError",
     "TruncatedExportError",
     "RowLengthError",
+    "CompressionError",
     "read_header",
     "iter_rows",
     "iter_cono_values",

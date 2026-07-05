@@ -120,11 +120,17 @@ class CompareCancelled(Exception):
 class _DegeneratePkError(Exception):
     """The metadata PK failed to uniquely key this export's rows.
 
-    Happens when a PK column is blank on the wire (seen in the field: MITBAL
-    exports with ``mbwhlo`` empty; CUGEX1/CSYTAB rows with blank key columns),
-    collapsing the masked key so distinct rows collide. Keying on it would
-    silently overwrite rows and produce a wrong diff — the table is retried
-    per key (ADR-025), or with whole-table full-row identity when too large.
+    This used to fire constantly because the reader returned carry-forward
+    compressed rows verbatim: string PK columns looked blank (MITBAL ``mbwhlo``,
+    CUGEX1/CSYTAB key columns), collapsing distinct rows onto one masked key.
+    That was compression, not data damage, and is now decompressed at the reader
+    (ADR-026) — those cases no longer degenerate.
+
+    The machinery is **kept as a safety net** for a genuinely wrong PK: metadata
+    that declares columns which do not actually key the rows (real duplicate PK
+    values). Expect it to fire rarely-to-never. Keying on a non-unique PK would
+    silently overwrite rows, so the table is retried per key (ADR-025), or with
+    whole-table full-row identity when too large.
     """
 
 
@@ -213,6 +219,11 @@ def _ignored(name: str, patterns: tuple[str, ...], cono_fields: frozenset[str]) 
 
 
 def _values_equal(a: str | None, b: str | None, null_equals_empty: bool) -> bool:
+    # Post-ADR-026 a decoded Row never contains "" (a present zero-length string
+    # is a carry marker, decompressed away), so in practice this only ever sees
+    # real values or None (absent). The null/"" bridge is kept for its original
+    # meaning — it now only matters against a hypothetical future writer or a raw
+    # (decompress=False) side that carries a literal "".
     if a == b:
         return True
     if null_equals_empty:
@@ -299,11 +310,12 @@ def _diff_one(name: str, a: ExportSource, b: ExportSource, opt: CompareOptions) 
     try:
         return _diff_one_pass(name, a, b, opt, force_heuristic=False)
     except _DegeneratePkError as exc:
-        # The metadata PK collided on real rows (a PK column blank on the wire).
-        # Retry per key (ADR-025): clean keys keep field-level detail; only the
-        # ambiguous key groups degrade to set membership. A table too large to
-        # hold both sides falls back to whole-table full-row identity, which
-        # has no field detail either way.
+        # The metadata PK collided on real rows — now expected only when the PK
+        # metadata is genuinely wrong (the blank-PK-on-the-wire cases were
+        # compression, fixed at the reader, ADR-026). Retry per key (ADR-025):
+        # clean keys keep field-level detail; only the ambiguous key groups
+        # degrade to set membership. A table too large to hold both sides falls
+        # back to whole-table full-row identity, which has no field detail either way.
         _log.info("table %s: degenerate metadata PK (%s); retrying per-key", name, exc)
         try:
             return _diff_one_grouped(name, a, b, opt)

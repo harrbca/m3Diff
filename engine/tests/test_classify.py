@@ -32,8 +32,11 @@ def test_company_table():
 def test_global_table_absent_blank_and_zero_all_count_as_global():
     fields = [field("svcono", "4"), field("svsiid", maxlen="10")]
     rows = [
-        {"svsiid": "X"},  # CONO absent      -> global
-        {"svcono": "", "svsiid": "Y"},  # CONO blank present -> global
+        {"svsiid": "X"},  # CONO absent      -> global (how real exports store globals)
+        # A present zero-length INTEGER CONO does not occur in a well-formed export
+        # (globals are bitmap-absent), but the stop-at-CONO fast path does not
+        # decompress/validate — it defensively normalizes a stray blank to global.
+        {"svcono": "", "svsiid": "Y"},  # CONO blank present -> global (fast-path robustness)
         {"svcono": "0", "svsiid": "Z"},  # CONO literal "0"   -> global
     ]
     result = _classify(fields, rows, "COSRVI")
