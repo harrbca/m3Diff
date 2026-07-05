@@ -127,3 +127,48 @@ def test_render_unknown_format_errors():
                              "params": {"result": {}, "format": "xml"}})])
     err = [m for m in msgs if m.get("type") == "error"][0]
     assert "unknown format" in err["error"]["message"]
+
+
+def test_serve_pipes_survive_non_ascii_data(tmp_path):
+    """Regression for the field failure: an MF compare died with «'charmap'
+    codec can't encode characters» because Windows pipes default to cp1252 and
+    result JSON is written ensure_ascii=False. serve() must pin its stdio to
+    UTF-8 regardless of how the parent spawned it."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import m3diff
+
+    desc_a = "Größe 10µm 高强度™"
+    desc_b = "Größe 12µm 高强度™"
+    a = tmp_path / "a.zip"
+    b = tmp_path / "b.zip"
+    a.write_bytes(build_export_zip({"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": desc_a}])}))
+    b.write_bytes(build_export_zip({"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": desc_b}])}))
+
+    # Strip any UTF-8 overrides so the child gets the hostile cp1252 default.
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONUTF8", "PYTHONIOENCODING")}
+    env["PYTHONPATH"] = str(Path(m3diff.__file__).parents[1])
+
+    req = json.dumps({
+        "id": 1, "method": "compare",
+        "params": {"mode": "inter", "a": str(a), "b": str(b), "cono_a": "100", "cono_b": "100",
+                   "generated_at": "t"},
+    })
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "m3diff.cli", "serve"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+    )
+    out, _ = proc.communicate((req + "\n").encode("utf-8"), timeout=60)
+
+    frames = [json.loads(line) for line in out.decode("utf-8").splitlines() if line.strip()]
+    errors = [f for f in frames if f.get("type") == "error"]
+    assert not errors, f"serve errored: {errors[0]['error']['message']}"
+    results = [f for f in frames if f.get("type") == "result"]
+    assert results, "no result frame from serve"
+    # No schema cache => heuristic PK => the changed row reads as remove+add.
+    td = results[0]["result"]["tables"]["MITMAS"]
+    assert td["removed"][0]["row"]["mmitds"] == desc_a  # values intact through the pipe
+    assert td["added"][0]["row"]["mmitds"] == desc_b

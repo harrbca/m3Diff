@@ -207,7 +207,30 @@ class RpcServer:
         return {"format": fmt, "content": renderers[fmt](result)}
 
 
+def _reconfigure_utf8(stream: TextIO) -> None:
+    """Force UTF-8 on a real stdio stream (no-op for test doubles).
+
+    On Windows a piped stdin/stdout defaults to the locale codepage (cp1252):
+    result JSON with real M3 data (accented descriptions etc., sent with
+    ``ensure_ascii=False``) then dies with 'charmap' codec errors, and inbound
+    non-ASCII paths would mis-decode. The NDJSON transport is UTF-8 (the shell
+    reads/writes UTF-8), so pin both directions.
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8")
+        except Exception:  # pragma: no cover - exotic stream; keep serving
+            pass
+
+
 def serve(inp: TextIO | None = None, out: TextIO | None = None) -> int:
     """Run the RPC server over the given streams (default stdin/stdout)."""
-    RpcServer(out or sys.stdout).run(inp or sys.stdin)
+    if out is None:
+        out = sys.stdout
+        _reconfigure_utf8(out)
+    if inp is None:
+        inp = sys.stdin
+        _reconfigure_utf8(inp)
+    RpcServer(out).run(inp)
     return 0

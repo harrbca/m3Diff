@@ -42,6 +42,10 @@ fn spawn_backend(handle: tauri::AppHandle) -> std::io::Result<ChildStdin> {
         .args(["-m", "m3diff.cli", "serve"])
         .env("PYTHONPATH", engine_src)
         .env("PYTHONUNBUFFERED", "1")
+        // NDJSON transport is UTF-8; without this, Windows pipes default to the
+        // locale codepage and real M3 data breaks the result frames. serve()
+        // also reconfigures its stdio — this is defense in depth.
+        .env("PYTHONUTF8", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

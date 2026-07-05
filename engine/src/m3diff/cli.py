@@ -41,7 +41,14 @@ def _parse_tables(value: str | None) -> tuple[str, ...] | None:
 
 def _write_text(out: str | None, text: str) -> None:
     if out is None or out == "-":
-        sys.stdout.write(text)
+        # Result text is UTF-8 (contract renderers); Windows consoles/pipes
+        # default to cp1252 which cannot encode real M3 data. Write bytes.
+        buffer = getattr(sys.stdout, "buffer", None)
+        if buffer is not None:
+            buffer.write(text.encode("utf-8"))
+            buffer.flush()
+        else:  # test doubles (StringIO) have no .buffer
+            sys.stdout.write(text)
     else:
         Path(out).write_text(text, encoding="utf-8", newline="")
 
