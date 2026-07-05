@@ -53,7 +53,9 @@ per table plus a `TABLE_INFO` catalog (typically zipped together).
     [null bitmap: ceil(nfields/8) bytes, MSB-first, one bit per column
      in header order; bit set = value present in payload]
     [for each set bit, in column order:
-        4B big-endian uint32 value length, then UTF-8 bytes]
+        4B big-endian uint32 value length, then UTF-8 bytes;
+        a length of 0 in a STRING column is a carry-forward marker meaning
+        "same as this column's last present value" — see the compression rules]
 ```
 
 Verified behaviors that MUST be preserved:
@@ -63,8 +65,9 @@ Verified behaviors that MUST be preserved:
 - **A column absent from the bitmap is null/default.** For the company column
   specifically: absent-from-bitmap ⇒ CONO 0 ⇒ tenant-global row. This is how
   global config tables (e.g. COSRVI, output service definitions) actually
-  store their rows. Do not conflate with empty string, which is a present
-  value of length 0 — the format distinguishes them.
+  store their rows. A present value of length 0 in a string column is **not** an
+  empty string — it is a carry-forward marker (below); a genuine blank string is
+  bitmap-absent, so after decompression a decoded row never contains `""`.
 - **Row-boundary invariant:** bytes consumed per row must exactly equal the
   declared row length. Assert this; it is the format's built-in checksum.
 - **Company column identification:** a 6-character field name ending in
@@ -73,6 +76,35 @@ Verified behaviors that MUST be preserved:
   where more than one column matches the heuristic.
 - Null bitmap width scales with column count (34 cols → 5 bytes,
   268 cols → 34 bytes). Verified against real files up to 268 columns.
+
+**String-column carry-forward compression (verified 2026-07-05).** String
+columns are run-length compressed against the previous row. Observed over 15.3M
+rows / ~2,600 non-empty tables across two real exports with zero
+counterexamples; decompressed values match live-DB rows exactly and restore
+primary-key uniqueness in every table (see ADR-026). Six normative rules:
+
+1. A present, zero-length value occurs **only in string columns** (JDBC type
+   `12` VARCHAR; type `1` CHAR would also be a string type). It means: **this
+   column has the same value as its last present value**, in file order.
+2. The carried value is the **last present effective value** for that column in
+   the stream (after that value's own decompression).
+3. Non-string columns (`4` INTEGER, `2` NUMERIC, `-5` BIGINT) are **never
+   compressed**; identical consecutive values repeat verbatim. A zero-length
+   value in a non-string column is a format violation.
+4. Genuine blank/null strings are **bitmap-absent** (the existing null
+   semantic), so a zero-length value is unambiguous and a **decompressed row
+   never contains an empty string**.
+5. A column's **first present occurrence is never zero-length** (nothing to
+   carry); a zero-length value with no prior value is a format violation
+   ("orphan carry").
+6. Carry state is **per table stream, per column, purely positional**. It does
+   not reset at CONO/DIVI boundaries or anywhere else; nothing in the header or
+   TABLE_INFO signals the behavior.
+
+Rules 3 and 5 are treated like the row-length invariant — as checksums: the
+reader raises a typed `CompressionError` (an `ExportFormatError`, so the
+per-table containment of F6 turns it into an `error` result) rather than
+silently absorbing it.
 
 ### 2.2 TABLE_INFO (standard Java serialization)
 
@@ -96,6 +128,12 @@ authoritative reference for the format:
 | `classify_export.py` | Streams a zip/directory of exports; classifies each table as NO_CONO / GLOBAL / COMPANY / MIXED / EMPTY; writes CSV. Optimization worth keeping: per row, stop decoding at the CONO field. |
 
 Port their logic into the backend package with tests; do not shell out to them.
+
+They remain the authoritative reference for framing, header, bitmap, and
+row-length behavior, but they **predate the discovery of string carry-forward
+compression** (§2.1, ADR-026) and do not implement it — so on real exports they
+under-report string values (returning zero-length markers verbatim). The engine
+reader is now the authoritative decoder for value semantics.
 
 ---
 
@@ -306,9 +344,14 @@ per-table CSV export.
 - Golden tests: classifier output, diff JSON for hand-built A/B fixtures
   covering: identical tables, added/removed/modified rows, CONO masking,
   null-vs-empty, absent-from-bitmap CONO, schema mismatch, truncated file,
-  multi-CONO exports, NO_CONO table.
+  multi-CONO exports, NO_CONO table. Carry-forward compression (ADR-026):
+  (8) a value carried across a CONO boundary that, with CONO masked, makes the
+  intra diff identical; (9) a PK column carried down runs that would degenerate
+  the metadata PK if read literally but keys cleanly once decompressed;
+  (10) same logical data on one uncompressed and one compressed side → identical.
 - Property test: round-trip a generated export through the reader; row-length
-  invariant must hold.
+  invariant must hold. Compressed fixtures (builder `compress=True`) round-trip
+  through the decompressing reader to their original logical rows.
 
 ### 6.4 Naming and hygiene
 

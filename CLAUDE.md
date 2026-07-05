@@ -26,10 +26,13 @@ for functional detail.
 ## How to work
 
 - The `reference/` folder holds three prototype scripts (`classify_export.py`,
-  `parse_export.py`, `parse_tableinfo.py`). They are the **authoritative,
-  verified implementation of the binary export format**. Port their logic into
-  the real package with tests; do not shell out to them and do not re-derive
-  the format from scratch — but do improve on their structure.
+  `parse_export.py`, `parse_tableinfo.py`). They are the verified reference for
+  the binary export format's **framing, header, bitmap, and row-length**
+  behavior. Port their logic into the real package with tests; do not shell out
+  to them and do not re-derive the format from scratch — but do improve on their
+  structure. Caveat: they predate the discovery of **string carry-forward
+  compression** (ADR-026) and do not implement it, so they under-report string
+  values on real exports — the engine reader supersedes them on value semantics.
 - **Diff engine is a pure library with a CLI.** The GUI is a thin shell over
   it. CLI and GUI must produce identical result JSON for identical inputs.
   This keeps the tool scriptable and testable without the desktop shell.

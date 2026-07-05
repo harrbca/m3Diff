@@ -928,3 +928,85 @@ covers CSYTAB, CSYSTS, CSYVIP and the rest of the generic/system tables.
   byte-identical (covered by the existing parallel golden test).
 - Result JSON gains ``ambiguous_keys`` (additive; ``from_dict`` defaults 0).
   TS types updated; suite 161 → 164.
+
+---
+
+## ADR-026 — Export string columns are carry-forward compressed; decompress in the reader
+
+- **Date:** 2026-07-05
+- **Status:** Accepted. Format-semantics correction ratified by owner
+  (hard-error stance and minor version bump both confirmed).
+
+**Context.** Diffing real tenant exports produced degenerate results: within-
+company primary-key collisions in hundreds of tables, with some key columns
+appearing ~96–99% blank. A prior investigation (written up in the gitignored
+`fixtures/real/export-format-compression-findings.md`; no tenant data repeated
+here) established that this is **not a data defect**: the export binary format
+**run-length-compresses string columns against the previous row**. A string
+column present in a row's bitmap with a **zero-length value means "same as this
+column's last present value"**, not an empty string. The reference prototypes
+never implemented this, so the engine's port returned compressed rows verbatim —
+masked keys collided, unchanged values looked changed, and ADR-025's degenerate-
+PK retry was firing constantly to compensate for compression rather than for
+wrong PK metadata. Carry-forward decompression was validated exhaustively (15.3M
+rows across two exports, zero counterexamples; reconstructed values match live-DB
+rows exactly; PK collisions drop to zero in every table). The six normative rules
+are now in spec §2.1.
+
+**Decision.** Decompress in the reader, always on.
+
+- ``iter_rows`` / ``read_table`` keep one carry value per column (last present
+  value, positional over the whole table stream) and substitute it for each
+  present zero-length string cell. A decoded ``Row`` therefore **never contains
+  ``""``**; genuine blanks remain bitmap-absent. A library-only
+  ``decompress: bool = True`` keyword exposes the raw cells for diagnostics and
+  byte round-trip tests; it is **not** surfaced on the CLI.
+- **Rejected alternatives.** (a) An opt-in decompression layer, or decompressing
+  in the diff engine rather than the reader: rejected because compressed rows are
+  simply what the format *means* — every consumer (diff, classify, CLI, GUI, any
+  future tool) must see decompressed rows or it is wrong, so the decode belongs
+  at the single choke point that already owns the wire format. (b) A warning with
+  a literal-``''`` fallback: rejected in favor of a hard error (below).
+- **Checksum stance.** A zero-length value in a non-string column, or with no
+  prior value to carry (orphan), raises a new typed
+  ``CompressionError(ExportFormatError)`` naming the column and row ordinal —
+  treated like the row-length invariant. Zero violations were observed in 15.3M
+  rows, so a silent literal-``''`` fallback would only mask a future writer
+  changing the semantics; F6 per-table containment already turns the raise into
+  a loud ``error`` result instead of failing the run. If Infor later confirms a
+  writer version emits literal empty strings, a compat flag can be added then.
+- The classifier's stop-at-CONO fast path is unaffected: CONO is INTEGER in
+  every observed export and non-string columns never compress, so the CONO cell
+  is always a literal. ``iter_cono_values`` guards the never-observed string-CONO
+  case by raising ``CompressionError`` up front rather than risk mis-yielding a
+  carry marker.
+
+**Consequences.**
+- Decoded values change on every real export (they were previously wrong), so
+  the engine version is bumped **0.1.0 → 0.2.0** (minor, per §7 of the plan) to
+  make results attributable. No result-JSON contract/shape change.
+- **ADR-025 status.** The per-key degenerate-PK retry is **kept as a safety net**
+  for genuinely wrong PK metadata (declared columns that do not uniquely key the
+  rows). Its historical triggers (MITBAL ``mbwhlo``, CUGEX1/CSYTAB key columns)
+  were compression and are now fixed at the reader, so it is expected to fire
+  rarely-to-never. Removing it is a **separate decision**, to be revisited once
+  real exports confirm zero triggers; comments in ``diff.py`` were updated, no
+  logic removed.
+- ``null_equals_empty`` keeps its default and meaning; since a decoded row no
+  longer contains ``""`` it now only bridges ``None`` vs a literal ``""`` from a
+  hypothetical future writer or a raw (``decompress=False``) side — no behavior
+  change.
+- Test fixtures that previously wrote literal ``""`` string cells (blank-PK and
+  present-empty cases) were audited: blanks become bitmap-absent, degenerate-PK
+  cases now use genuine duplicate PK values, and the old present-empty-vs-absent
+  wire distinction is retired. The builder gained ``compress=True`` (the writer-
+  side inverse). New golden cases cover carry across a CONO boundary, a
+  compressed PK column that no longer degenerates, and mixed-compression
+  identity. Suite 164 → 178.
+
+**Open questions for Infor / the export-pipeline owner** (from the findings
+doc; we derived the format empirically): whether the compression is documented;
+whether a zero-length string is *guaranteed* "repeat previous" for every writer
+version; whether the carry is guaranteed per-column-last-present across absent
+rows; whether non-string columns are guaranteed never compressed; and whether
+anything in the header/TABLE_INFO signals the behavior or its version.

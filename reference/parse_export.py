@@ -1,3 +1,10 @@
+# NOTE (2026-07-05): This prototype is the verified reference for the export
+# format's framing, header, bitmap, and row-length behavior — but it predates
+# the discovery of STRING CARRY-FORWARD COMPRESSION (spec §2.1, ADR-026). It
+# returns zero-length string cells verbatim instead of repeating the column's
+# last present value, so on real exports it under-reports string values. The
+# m3diff engine reader (engine/src/m3diff/format/reader.py) is the authoritative
+# decoder for value semantics. Kept as-is for format-framing reference only.
 import struct, sys, json
 
 def parse(path):
