@@ -574,3 +574,36 @@ re-fetching any columns. The GUI drill-down shows it as a program chip.
   set that benefits. Transaction tables (written by many programs) mostly don't.
 - Result JSON gains ``maintained_by`` (additive); TS types updated.
 - Suite 138 → 144.
+
+---
+
+## ADR-018 — GUI file exports are engine-rendered; settings persist locally
+
+- **Date:** 2026-07-04
+- **Status:** Accepted.
+
+**Context.** The GUI needed "Save CSV/MD/JSON" (renderers existed only behind
+CLI ``--format``) and kept forgetting the schema-DB / ``.ionapi`` paths on every
+launch.
+
+**Decision.**
+- **Exports:** a ``render`` RPC takes the result dict + format and returns the
+  string produced by the *same* renderers the CLI uses; the shell writes it via
+  a minimal ``save_text_file`` Tauri command (path always from the OS save
+  dialog). Enabled by ``contract.from_dict()`` — the inverse of ``to_dict``,
+  tolerant of additive fields missing from older JSON — which is also the
+  groundwork for results history (reopen saved runs).
+- **Settings:** persisted in WebView ``localStorage`` — paths and toggles only,
+  never file contents. The ``.ionapi`` stays wherever the user keeps it;
+  ADR-009's at-rest import/ACL story remains TBD and unchanged.
+
+**Rationale.** Rendering in the engine preserves the CLI==GUI identity
+guarantee (a GUI-saved file is byte-identical to ``m3diff compare --format``);
+re-implementing renderers in TS would fork it. ``localStorage`` needs no new
+Tauri plugin or Rust dependency — proportionate for non-secret preferences.
+
+**Consequences.**
+- The RPC gains ``render``; ``schema_refresh`` gains ``info_only`` (the GUI's
+  "Update table info (fast)" button).
+- Results view: maintained-by column, program-aware search, save buttons.
+- Suite 144 → 148; cargo + tsc/vite clean.

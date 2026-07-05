@@ -172,3 +172,59 @@ def to_dict(result: DiffResult) -> dict[str, Any]:
 def to_json(result: DiffResult) -> str:
     """Serialize to the canonical, deterministic result JSON (with trailing newline)."""
     return json.dumps(to_dict(result), sort_keys=True, ensure_ascii=False, indent=2) + "\n"
+
+
+# --- deserialization (render RPC, future results-history) --------------------
+def _side_from_dict(d: dict[str, Any]) -> SideInfo:
+    return SideInfo(file=d["file"], cono=d.get("cono"), tables=d["tables"], rows=d.get("rows"))
+
+
+def _table_from_dict(d: dict[str, Any]) -> TableDiff:
+    return TableDiff(
+        table_class=d["class"],
+        pk=list(d["pk"]),
+        pk_source=d["pk_source"],
+        schema_component=d.get("schema_component"),
+        component_ambiguous=d["component_ambiguous"],
+        schema_match=d["schema_match"],
+        rows_a=d["rows_a"],
+        rows_b=d["rows_b"],
+        status=d["status"],
+        counts=ChangeCounts(**d["counts"]),
+        added=[RowRef(pk=list(r["pk"]), row=dict(r["row"])) for r in d["added"]],
+        removed=[RowRef(pk=list(r["pk"]), row=dict(r["row"])) for r in d["removed"]],
+        modified=[
+            ModRef(
+                pk=list(m["pk"]),
+                changes={k: FieldChange(a=c["a"], b=c["b"]) for k, c in m["changes"].items()},
+            )
+            for m in d["modified"]
+        ],
+        truncated=d["truncated"],
+        global_subset=d["global_subset"],
+        modified_detail=d["modified_detail"],
+        # .get: additive fields absent from result JSON written by older versions
+        pk_degenerate=d.get("pk_degenerate", False),
+        maintained_by=d.get("maintained_by"),
+        error=d.get("error"),
+    )
+
+
+def from_dict(data: dict[str, Any]) -> DiffResult:
+    """Rebuild a DiffResult from its ``to_dict`` form. Inverse of ``to_dict``:
+    ``to_json(from_dict(d)) == to_json(result)`` for any result this version
+    wrote; additive fields missing from older JSON take their defaults."""
+    return DiffResult(
+        tool_version=data["tool_version"],
+        mode=data["mode"],
+        generated_at=data["generated_at"],
+        a=_side_from_dict(data["a"]),
+        b=_side_from_dict(data["b"]),
+        settings=SettingsInfo(
+            ignored_fields=list(data["settings"]["ignored_fields"]),
+            null_equals_empty=data["settings"]["null_equals_empty"],
+            pk_mask=list(data["settings"]["pk_mask"]),
+        ),
+        summary=Summary(**data["summary"]),
+        tables={name: _table_from_dict(td) for name, td in data["tables"].items()},
+    )

@@ -9,10 +9,11 @@ replies with matching-``id`` frames:
     error     {"id": 1, "type": "error", "error": {"message": "..."}}
     cancelled {"id": 1, "type": "cancelled", "result": {"cancelled": true}}
 
-Long tasks (compare / classify / schema_refresh) run on worker threads so a
-``cancel`` request can be read and honored while one is in flight. stdout writes
-are serialized behind a lock. Methods: ping, compare, classify, schema_refresh,
-cancel.
+Long tasks (compare / classify / schema_refresh / render) run on worker threads
+so a ``cancel`` request can be read and honored while one is in flight. stdout
+writes are serialized behind a lock. Methods: ping, compare, classify,
+schema_refresh (``info_only`` for the cheap table-info update), render (result
+dict → json/csv/md via the CLI's renderers), cancel.
 """
 from __future__ import annotations
 
@@ -24,12 +25,13 @@ from typing import Any, TextIO
 
 from . import __version__
 from .classify import TableClassification, classify_export
-from .contract import to_dict
+from .contract import from_dict, to_dict, to_json
 from .diff import DEFAULT_IGNORED_FIELDS, CompareCancelled, CompareOptions, compare
+from .report import to_markdown, to_summary_csv
 from .schema.cache import SchemaCache
 from .source import open_export
 
-_LONG_METHODS = ("compare", "classify", "schema_refresh")
+_LONG_METHODS = ("compare", "classify", "schema_refresh", "render")
 
 
 def _classification_to_dict(c: TableClassification) -> dict[str, Any]:
@@ -119,6 +121,7 @@ class RpcServer:
                 "compare": self._do_compare,
                 "classify": self._do_classify,
                 "schema_refresh": self._do_schema_refresh,
+                "render": self._do_render,
             }[method]
             result = handler(rid, params, cancel)
             self._send({"id": rid, "type": "result", "result": result})
@@ -176,17 +179,32 @@ class RpcServer:
         from datetime import datetime, timezone
 
         from .schema.ionapi import load_ionapi
-        from .schema.publisher import MetadataPublisherClient, httpx_client, refresh_schema
+        from .schema.publisher import (
+            MetadataPublisherClient, httpx_client, refresh_schema, refresh_table_info,
+        )
 
         credentials = load_ionapi(params["ionapi"])
         client = MetadataPublisherClient.from_ionapi(credentials, httpx_client())
-        fetched_at = datetime.now(timezone.utc).isoformat()
         with SchemaCache(params["schema_db"]) as cache:
+            if params.get("info_only"):
+                total = refresh_table_info(client, cache, progress=self._progress(rid))
+                return {"tables": total, "info_only": True}
+            fetched_at = datetime.now(timezone.utc).isoformat()
             total = refresh_schema(
                 client, cache, prefix=params.get("prefix"), fetched_at=fetched_at,
                 progress=self._progress(rid),
             )
         return {"tables": total}
+
+    def _do_render(self, rid: Any, params: dict[str, Any], cancel: threading.Event) -> dict[str, Any]:
+        """Render a result dict to json/csv/md — the same renderers the CLI uses,
+        so a GUI-saved file is byte-identical to `m3diff compare --format` output."""
+        renderers = {"json": to_json, "csv": to_summary_csv, "md": to_markdown}
+        fmt = params.get("format", "json")
+        if fmt not in renderers:
+            raise ValueError(f"unknown format: {fmt!r}")
+        result = from_dict(params["result"])
+        return {"format": fmt, "content": renderers[fmt](result)}
 
 
 def serve(inp: TextIO | None = None, out: TextIO | None = None) -> int:

@@ -430,3 +430,26 @@ def test_result_json_is_valid_and_deterministic():
     assert parsed["tool_version"] == "0.1.0"
     removed_pks = [entry["pk"] for entry in parsed["tables"]["MITMAS"]["removed"]]
     assert removed_pks == sorted(removed_pks)  # change lists sorted by masked PK
+
+
+def test_from_dict_round_trips_to_identical_json():
+    """from_dict(to_dict(r)) re-serializes byte-identically (render RPC contract)."""
+    from m3diff.contract import from_dict, to_dict
+
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": n, "mmitds": "OLD"} for n in ("B", "A")])}
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "NEW"}])}
+    result = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache())
+    assert to_json(from_dict(to_dict(result))) == to_json(result)
+
+
+def test_from_dict_tolerates_older_json_without_additive_fields():
+    from m3diff.contract import from_dict, to_dict
+
+    tables = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    d = to_dict(_compare(tables, tables, mode="inter", cono_a="100", cono_b="100"))
+    for td in d["tables"].values():  # simulate a result written before ADR-014/017
+        del td["pk_degenerate"]
+        del td["maintained_by"]
+    rebuilt = from_dict(d)
+    td = rebuilt.tables["MITMAS"]
+    assert td.pk_degenerate is False and td.maintained_by is None

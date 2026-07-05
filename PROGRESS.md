@@ -123,10 +123,14 @@ Check items as they land. Each feature ships with tests (see spec §6.3).
       (ADR-017) and a `pk_degenerate` warning badge
 - [x] Progress reporting + cancel + per-table error tolerance (F5/F6, UI-wired)
 - [x] Results dashboard + table drill-down + row/field drill-down
-- [x] Export renderers JSON/CSV/Markdown in engine + CLI `--format`; UI has
-      "Copy result JSON" (CSV/MD save buttons TBD)
-- [x] Settings: `.ionapi` path, schema refresh, ignore-fields, null/mask toggles;
-      retention + `.ionapi` at-rest storage (ADR-009) TBD
+- [x] Export renderers JSON/CSV/Markdown in engine + CLI `--format`; UI saves
+      all three **engine-rendered** via the `render` RPC (ADR-018) — byte-
+      identical to CLI output. Results table: maintained-by column + program-
+      aware search; pk_degenerate marked
+- [x] Settings: `.ionapi` path, schema refresh (+ "Update table info (fast)" =
+      info-only), ignore-fields, null/mask toggles; **persisted across launches**
+      (localStorage, paths only — ADR-018). `.ionapi` at-rest import/ACL
+      (ADR-009) still TBD
 - [ ] Results history (reopen without reprocessing)
 - [ ] Live `tauri dev` RPC smoke (opens a window — owner to run locally)
 
@@ -169,6 +173,8 @@ Detail lives in `DECISIONS.md`; headlines here.
   ST/SF), MVX-preferred, unions with `--tables`; engine half of ADR-006
 - 2026-07-04 ADR-017 → persist + surface `tableMaintainedBy` (OCUSMA→CRS610);
   `schema refresh --info-only`; result JSON gains `maintained_by`
+- 2026-07-04 ADR-018 → GUI exports engine-rendered (`render` RPC + `from_dict`);
+  settings persisted via localStorage (paths only, never contents)
 
 ## Open questions / blockers
 
@@ -213,9 +219,13 @@ Detail lives in `DECISIONS.md`; headlines here.
   On the real export every table categorizes: MF 1,944 (92% of rows), TF 1,329
   (8%), WF/ST/SF 898 (~0%, noise).
 - **Maintaining program shipped (ADR-017):** `maintained_by` in cache + result
-  JSON + drill-down chip; real cache populated via `schema refresh --info-only`
-  (982/5,381 tables named; OCUSMA→CRS610, OOTYPE→OIS010). Engine 144 tests;
-  frontend tsc+vite clean.
+  JSON + drill-down chip + Results column; real cache populated via
+  `schema refresh --info-only` (982/5,381 tables named; OCUSMA→CRS610,
+  OOTYPE→OIS010).
+- **GUI polish round (ADR-018):** Save JSON/CSV/MD engine-rendered (`render`
+  RPC + `contract.from_dict` — the groundwork for results history), settings
+  persisted across launches, "Update table info (fast)" button, program-aware
+  results search. Engine **148 tests**; cargo + tsc/vite clean.
 - **Diff is now table-parallel (ADR-013).** CLI `--workers` (0=auto default in
   the CLI, 1=serial, N=force). Proven byte-identical to serial on real data and
   ~3.5× at 6 workers on a scoped masters run. In-process retry means a flaky

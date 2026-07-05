@@ -90,3 +90,40 @@ def test_cancel_sets_the_task_event():
     server._dispatch({"id": 10, "method": "cancel", "params": {"target_id": 42}})
     assert event.is_set()
     assert json.loads(out.getvalue().splitlines()[0])["result"] == {"cancelled": True, "target_id": 42}
+
+
+def test_render_round_trips_through_the_cli_renderers(tmp_path):
+    """render returns exactly what the CLI --format would write for the same result."""
+    a = tmp_path / "a.zip"
+    b = tmp_path / "b.zip"
+    a.write_bytes(build_export_zip({"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "OLD"}])}))
+    b.write_bytes(build_export_zip({"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "NEW"}])}))
+    req = json.dumps({
+        "id": 10, "method": "compare",
+        "params": {"mode": "inter", "a": str(a), "b": str(b), "cono_a": "100", "cono_b": "100",
+                   "generated_at": "t"},
+    })
+    msgs = _run([req])
+    result_dict = [m for m in msgs if m.get("type") == "result"][0]["result"]
+
+    for fmt, marker in (("json", '"tool_version"'), ("csv", "table,"), ("md", "# m3diff")):
+        render_req = json.dumps({"id": 11, "method": "render",
+                                 "params": {"result": result_dict, "format": fmt}})
+        out = [m for m in _run([render_req]) if m.get("type") == "result"][0]["result"]
+        assert out["format"] == fmt
+        assert marker in out["content"]
+
+    # json render == canonical to_json of the same result (byte-identical path)
+    from m3diff.contract import from_dict, to_json
+
+    render_req = json.dumps({"id": 12, "method": "render",
+                             "params": {"result": result_dict, "format": "json"}})
+    content = [m for m in _run([render_req]) if m.get("type") == "result"][0]["result"]["content"]
+    assert content == to_json(from_dict(result_dict))
+
+
+def test_render_unknown_format_errors():
+    msgs = _run([json.dumps({"id": 13, "method": "render",
+                             "params": {"result": {}, "format": "xml"}})])
+    err = [m for m in msgs if m.get("type") == "error"][0]
+    assert "unknown format" in err["error"]["message"]
