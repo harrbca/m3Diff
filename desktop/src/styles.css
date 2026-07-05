@@ -150,3 +150,6 @@ table.grid tbody tr.sel { background: #e3ecfd; }
 
 /* maintaining-program chip (Drilldown) */
 .chip.pgm { background: #e8f0fe; color: #1a56b0; font-family: var(--mono, monospace); }
+
+/* results export buttons */
+.export-actions { display: flex; gap: 12px; align-items: baseline; }

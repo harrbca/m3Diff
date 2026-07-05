@@ -42,15 +42,17 @@ export function SettingsView({ settings, onChange, onClose }: Props) {
   const set = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     onChange({ ...settings, [key]: value });
 
-  async function refreshSchema() {
-    setRefresh("refreshing…");
+  async function refreshSchema(infoOnly: boolean) {
+    setRefresh(infoOnly ? "updating table info…" : "refreshing…");
     try {
       const res = await rpc.request<{ tables: number }>(
         "schema_refresh",
-        { ionapi: settings.ionapi, schema_db: settings.schemaDb },
-        (p: Progress) => setRefresh(`refreshing… ${p.done}/${p.total} (${p.table})`),
+        { ionapi: settings.ionapi, schema_db: settings.schemaDb, info_only: infoOnly || undefined },
+        (p: Progress) => setRefresh(`${infoOnly ? "updating" : "refreshing"}… ${p.done}/${p.total} (${p.table})`),
       );
-      setRefresh(`done — ${res.tables} tables cached`);
+      setRefresh(
+        infoOnly ? `done — table info updated for ${res.tables} tables` : `done — ${res.tables} tables cached`,
+      );
     } catch (e) {
       setRefresh(`failed: ${String(e)}`);
     }
@@ -72,8 +74,15 @@ export function SettingsView({ settings, onChange, onClose }: Props) {
           onPick={(p) => set("ionapi", p)} />
 
         <div className="refresh-row">
-          <button disabled={!settings.ionapi || !settings.schemaDb} onClick={refreshSchema}>
+          <button disabled={!settings.ionapi || !settings.schemaDb} onClick={() => refreshSchema(false)}>
             Refresh schema from M3
+          </button>
+          <button
+            disabled={!settings.ionapi || !settings.schemaDb}
+            onClick={() => refreshSchema(true)}
+            title="One call: updates category / description / maintaining program for cached tables without re-fetching columns."
+          >
+            Update table info (fast)
           </button>
           <span className="muted small">{refresh}</span>
         </div>
@@ -97,6 +106,7 @@ export function SettingsView({ settings, onChange, onClose }: Props) {
         <p className="muted small">
           The <code>.ionapi</code> file is a secret — it is only read for schema refresh, never logged.
           Schema refresh needs network access and the <code>httpx</code> extra installed.
+          Settings (paths and toggles, never file contents) are remembered between launches.
         </p>
       </div>
     </div>

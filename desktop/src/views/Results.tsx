@@ -1,4 +1,7 @@
 import { useMemo, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { rpc } from "../rpc";
 import type { DiffResult, TableDiff } from "../types";
 import { Drilldown } from "./Drilldown";
 
@@ -37,17 +40,42 @@ export function ResultsView({ result }: Props) {
 
   const rows = useMemo(() => {
     const entries = Object.entries(result.tables) as [string, TableDiff][];
+    const q = query.toLowerCase();
     return entries
       .filter(([, td]) => (status === "all" ? true : td.status === status))
-      .filter(([name]) => name.toLowerCase().includes(query.toLowerCase()))
+      .filter(
+        ([name, td]) =>
+          name.toLowerCase().includes(q) || (td.maintained_by ?? "").toLowerCase().includes(q),
+      )
       .sort((a, b) => {
         const s = STATUS_ORDER.indexOf(a[1].status) - STATUS_ORDER.indexOf(b[1].status);
         return s !== 0 ? s : a[0].localeCompare(b[0]);
       });
   }, [result, status, query]);
 
+  const [saveMsg, setSaveMsg] = useState("");
+
   async function copyJson() {
     await navigator.clipboard.writeText(JSON.stringify(result, null, 2));
+  }
+
+  // Engine-rendered (render RPC): a saved file is byte-identical to what
+  // `m3diff compare --format <fmt>` would write for this result.
+  async function saveAs(format: "json" | "csv" | "md") {
+    setSaveMsg("");
+    const path = await save({
+      defaultPath: `m3diff-result.${format}`,
+      filters: [{ name: format.toUpperCase(), extensions: [format] }],
+    });
+    if (!path) return;
+    try {
+      setSaveMsg("rendering…");
+      const res = await rpc.request<{ content: string }>("render", { result, format });
+      await invoke("save_text_file", { path, contents: res.content });
+      setSaveMsg(`saved ✓ ${path.split(/[\\/]/).pop()}`);
+    } catch (e) {
+      setSaveMsg(`save failed: ${String(e)}`);
+    }
   }
 
   return (
@@ -56,9 +84,21 @@ export function ResultsView({ result }: Props) {
         <h2>
           Results <span className="muted">· {result.mode}</span>
         </h2>
-        <button className="link" onClick={copyJson}>
-          Copy result JSON
-        </button>
+        <div className="export-actions">
+          {saveMsg && <span className="muted small">{saveMsg}</span>}
+          <button className="link" onClick={copyJson}>
+            Copy JSON
+          </button>
+          <button className="link" onClick={() => saveAs("json")}>
+            Save JSON
+          </button>
+          <button className="link" onClick={() => saveAs("csv")}>
+            Save CSV
+          </button>
+          <button className="link" onClick={() => saveAs("md")}>
+            Save MD
+          </button>
+        </div>
       </div>
 
       <SummaryCards result={result} />
@@ -87,6 +127,7 @@ export function ResultsView({ result }: Props) {
               <th className="num">B</th>
               <th className="num">+ / − / ~</th>
               <th>PK</th>
+              <th>Maintained by</th>
             </tr>
           </thead>
           <tbody>
@@ -105,7 +146,9 @@ export function ResultsView({ result }: Props) {
                 <td className="mono small">
                   {td.pk_source}
                   {td.pk_source === "heuristic" ? " ⚠" : ""}
+                  {td.pk_degenerate ? " (degenerate)" : ""}
                 </td>
+                <td className="mono small">{td.maintained_by ?? ""}</td>
               </tr>
             ))}
           </tbody>

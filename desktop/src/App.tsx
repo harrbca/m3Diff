@@ -18,6 +18,20 @@ const DEFAULT_SETTINGS: AppSettings = {
   maskCono: true,
 };
 
+// Persisted across launches. Paths only, never file contents — the .ionapi
+// stays wherever the user keeps it (ADR-009 at-rest import is still TBD).
+const SETTINGS_KEY = "m3diff.settings";
+
+function loadSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+  } catch {
+    // corrupt store: fall through to defaults
+  }
+  return DEFAULT_SETTINGS;
+}
+
 function distinctConos(result: ClassifyResult): string[] {
   const seen = new Set<string>();
   for (const c of result.tables) for (const cono of c.conos) seen.add(cono);
@@ -27,7 +41,11 @@ function distinctConos(result: ClassifyResult): string[] {
 export default function App() {
   const [step, setStep] = useState<Step>("upload");
   const [showSettings, setShowSettings] = useState(false);
-  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<AppSettings>(loadSettings);
+
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }, [settings]);
 
   const [backend, setBackend] = useState<string>("connecting…");
   const [exportA, setExportA] = useState<ExportInfo | null>(null);

@@ -26,6 +26,13 @@ fn rpc_send(state: tauri::State<Backend>, line: String) -> Result<(), String> {
     Ok(())
 }
 
+// Writes engine-rendered export content (json/csv/md) to a user-chosen path.
+// The path comes from the save dialog, so the user has explicitly picked it.
+#[tauri::command]
+fn save_text_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
 fn spawn_backend(handle: tauri::AppHandle) -> std::io::Result<ChildStdin> {
     let python = std::env::var("M3DIFF_PYTHON").unwrap_or_else(|_| "python".to_string());
     let engine_src = std::env::var("M3DIFF_ENGINE_SRC")
@@ -70,7 +77,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![rpc_send])
+        .invoke_handler(tauri::generate_handler![rpc_send, save_text_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
