@@ -607,3 +607,41 @@ Tauri plugin or Rust dependency — proportionate for non-secret preferences.
   "Update table info (fast)" button).
 - Results view: maintained-by column, program-aware search, save buttons.
 - Suite 144 → 148; cargo + tsc/vite clean.
+
+---
+
+## ADR-019 — Pool liveness canary: prove the worker pool alive or fall back to serial
+
+- **Date:** 2026-07-04
+- **Status:** Accepted. Found by the first live GUI smoke test.
+
+**Context.** With the engine spawned by the Tauri shell (piped stdio, no
+console), ``ProcessPoolExecutor``'s spawn handshake **wedges**: all 32 workers
+sat at zero CPU with no Python frames (py-spy), the parent waited forever in
+``as_completed``, and — second bug — cancellation was never polled because no
+future ever completed. The identical code parallelizes correctly when launched
+from a terminal (every CLI run that day). Third bug, same neighborhood: workers
+from earlier CLI runs were found still alive hours later (``shutdown(wait=False)``
+orphaning idle workers on process exit).
+
+**Decision.** Before dispatching real work, submit a trivial **canary** task.
+If it doesn't complete within ``_CANARY_GRACE`` (15s) the pool is declared
+unusable: shut down without waiting, set a **sticky per-process flag** (only
+the first compare pays the grace wait; later compares go straight to serial),
+and run the compare **in-process serial** — same results, just slower. The
+result loop replaces ``as_completed`` with ``futures.wait(timeout=1)`` polling
+so cancellation is responsive in every state, and the success path uses
+``shutdown(wait=True)`` (workers are idle then) so none are leaked.
+
+**Rationale.** Environment-dependent deadlock → graceful degradation beats
+both hanging (unacceptable in a GUI) and disabling parallelism everywhere
+(the CLI's 3.5× win is real). The canary costs milliseconds on a healthy pool.
+
+**Consequences.**
+- Verified live: the GUI compare that previously hung forever now completes in
+  ~20s (15s canary + serial run); CLI parallel behavior unchanged; zero python
+  processes remain after app exit.
+- **Open (root cause):** why the spawn handshake wedges under a piped-stdio /
+  no-console parent on Windows + Python 3.14 — filed as a follow-up
+  investigation; a fix there would restore GUI parallelism.
+- Suite 148 → 150.

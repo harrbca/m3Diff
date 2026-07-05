@@ -18,9 +18,11 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor
+from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass, field, replace
 from typing import BinaryIO
 
@@ -53,6 +55,17 @@ MODE_GLOBAL = "global"
 # Below this many in-scope tables the process-pool startup cost outweighs the
 # win, so ``workers=0`` (auto) stays serial. An explicit ``workers>1`` overrides.
 _MIN_PARALLEL_TABLES = 4
+
+# How long a healthy pool gets to run the liveness canary (a trivial no-op
+# task). Worker spawn + zip re-open takes a few seconds; 15s is comfortable.
+_CANARY_GRACE = 15.0
+
+# Sticky per-process flag: set when a canary times out, after which this
+# process never tries a pool again (only the first compare pays the grace
+# wait). Observed in the field: multiprocessing's spawn handshake wedges when
+# the parent was itself spawned with piped stdio and no console by the GUI
+# shell — the same code parallelizes fine from a terminal.
+_pool_unavailable = False
 
 
 class CompareCancelled(Exception):
@@ -514,6 +527,33 @@ def _worker_one(name: str) -> TableDiff | None:  # pragma: no cover - runs in a 
     )
 
 
+def _worker_canary() -> bool:  # pragma: no cover - runs in a child process
+    return True
+
+
+def _pool_is_live(
+    executor: ProcessPoolExecutor, cancelled: Callable[[], bool] | None, grace: float
+) -> bool:
+    """True if the pool runs a trivial task within ``grace`` seconds.
+
+    Guards against the wedged-spawn-handshake environment (see
+    ``_pool_unavailable``): rather than hang forever on a pool that will never
+    produce a result, prove it alive first. Polls ``cancelled`` while waiting.
+    """
+    canary = executor.submit(_worker_canary)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if cancelled is not None and cancelled():
+            raise CompareCancelled("cancelled during worker startup")
+        try:
+            return bool(canary.result(timeout=1.0))
+        except TimeoutError:
+            continue
+        except Exception:  # BrokenProcessPool and friends: pool is not usable
+            return False
+    return False
+
+
 def _resolve_future(
     future: object,
     name: str,
@@ -555,28 +595,48 @@ def _compare_parallel(
     options_no_cache = replace(options, cache=None)  # the live cache is not picklable
 
     results: dict[str, TableDiff] = {}
-    done = 0
-    executor = ProcessPoolExecutor(
+    done_count = 0
+    executor: ProcessPoolExecutor | None = ProcessPoolExecutor(
         max_workers=workers,
         initializer=_init_worker,
         initargs=(a_origin, b_origin, cache_path, options_no_cache),
     )
     try:
+        if not _pool_is_live(executor, cancelled, _CANARY_GRACE):
+            # Pool never came up (wedged spawn handshake or broken): remember it
+            # for this process and degrade to the serial path instead of hanging.
+            global _pool_unavailable
+            _pool_unavailable = True
+            executor.shutdown(wait=False, cancel_futures=True)
+            executor = None
+            return _compare_serial(
+                scoped, a, b_source, a_names, b_names, options, total, progress, cancelled
+            )
+
         futures = {executor.submit(_worker_one, name): name for name in scoped}
-        for future in as_completed(futures):
+        pending: set = set(futures)
+        # wait() with a short timeout instead of as_completed: cancellation stays
+        # responsive even when no future completes (e.g. one huge table).
+        while pending:
+            finished, pending = futures_wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
             if cancelled is not None and cancelled():
-                raise CompareCancelled(f"cancelled after {done}/{total} tables")
-            name = futures[future]
-            diff = _resolve_future(future, name, a, b_source, a_names, b_names, options)
-            done += 1
-            if diff is not None:
-                results[name] = diff
-            if progress is not None:
-                progress(done, total, name)
+                raise CompareCancelled(f"cancelled after {done_count}/{total} tables")
+            for future in finished:
+                name = futures[future]
+                diff = _resolve_future(future, name, a, b_source, a_names, b_names, options)
+                done_count += 1
+                if diff is not None:
+                    results[name] = diff
+                if progress is not None:
+                    progress(done_count, total, name)
+        # All work drained and workers idle: join them so none are leaked (stray
+        # worker processes were observed lingering after wait=False here).
+        executor.shutdown(wait=True)
+        executor = None
     finally:
-        # Never block on in-flight workers when unwinding (e.g. on cancel); drop
-        # any not-yet-started tasks. Normal completion already drained them all.
-        executor.shutdown(wait=False, cancel_futures=True)
+        if executor is not None:
+            # Error/cancel unwind: never block on in-flight workers; drop queued.
+            executor.shutdown(wait=False, cancel_futures=True)
 
     # Reassemble in scoped order so the JSON is byte-identical to the serial path,
     # regardless of the order workers happened to finish in.
@@ -602,6 +662,8 @@ def _resolve_workers(
     ``_MIN_PARALLEL_TABLES``. An explicit ``workers>1`` is honored down to 2 tables.
     """
     if options.workers == 1 or scoped_len < 2:
+        return 1
+    if _pool_unavailable:  # a canary already timed out in this process
         return 1
     if not (_reopenable(a) and _reopenable(b_source) and _cache_shareable(options.cache)):
         return 1

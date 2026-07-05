@@ -97,7 +97,9 @@ button:not(.primary):not(.link):not(.gear) {
 .metric.bad .metric-n { color: var(--bad); }
 .filters { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
 .filters input, .filters select { padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+/* max-height keeps the drill-down below reachable on long results */
+.table-wrap { overflow-x: auto; overflow-y: auto; max-height: 48vh; border: 1px solid var(--line); border-radius: var(--radius); }
+table.grid thead th { position: sticky; top: 0; background: var(--panel, #fff); }
 table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.grid th, table.grid td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 table.grid th.num, table.grid td.num { text-align: right; }

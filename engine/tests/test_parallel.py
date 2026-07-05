@@ -235,3 +235,53 @@ def test_parallel_honors_cancellation(tmp_path):
             CompareOptions(mode="inter", cono_a="100", cono_b="100", workers=2),
             cancelled=lambda: True,
         )
+
+
+# --- pool liveness canary (wedged-spawn environments) --------------------------
+def test_canary_timeout_falls_back_to_serial_and_sticks(tmp_path, monkeypatch):
+    """Grace 0 simulates a pool that never comes up: the compare must still
+    produce the full (byte-identical) result via the serial path, and the
+    process remembers the wedge so later compares skip the pool entirely."""
+    import m3diff.diff as diffmod
+
+    monkeypatch.setattr(diffmod, "_CANARY_GRACE", 0.0)
+    monkeypatch.setattr(diffmod, "_pool_unavailable", False)  # restored after test
+    a = _write_zip(tmp_path / "a.zip", _side_a())
+    b = _write_zip(tmp_path / "b.zip", _side_b())
+    db = _write_schema_db(tmp_path / "schema.db", ("CIDMAS", "DUPKEY", "MITMAS", "MPDMAT", "OCUSMA"))
+
+    seen: list[tuple[int, int, str]] = []
+    cache = SchemaCache(db)
+    try:
+        result = compare(
+            open_export(a), open_export(b),
+            CompareOptions(mode="inter", cono_a="100", cono_b="100", cache=cache, workers=2),
+            tool_version="0.1.0", generated_at="2026-07-04T00:00:00Z",
+            a_label="a.zip", b_label="b.zip",
+            progress=lambda d, t, n: seen.append((d, t, n)),
+        )
+    finally:
+        cache.close()
+    assert to_json(result) == to_json(_compare(a, b, db, workers=1))  # fell back, identical
+    assert len(seen) == result.summary.tables_compared  # serial progress still emitted
+    assert diffmod._pool_unavailable is True  # sticky: no pool retry this process
+
+    # ...and the sticky flag short-circuits worker resolution immediately.
+    opt = CompareOptions(mode="inter", cono_a="100", cono_b="100", workers=8)
+    assert _resolve_workers(opt, 10, open_export(a), open_export(b)) == 1
+
+
+def test_cancel_during_worker_startup_is_prompt(tmp_path):
+    """Cancellation must interrupt the canary wait, not sit out the grace period."""
+    import time as _time
+
+    a = _write_zip(tmp_path / "a.zip", _side_a())
+    b = _write_zip(tmp_path / "b.zip", _side_b())
+    start = _time.monotonic()
+    with pytest.raises(CompareCancelled):
+        compare(
+            open_export(a), open_export(b),
+            CompareOptions(mode="inter", cono_a="100", cono_b="100", workers=2),
+            cancelled=lambda: True,
+        )
+    assert _time.monotonic() - start < 10  # well under the 15s grace

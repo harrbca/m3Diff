@@ -132,7 +132,16 @@ Check items as they land. Each feature ships with tests (see spec §6.3).
       (localStorage, paths only — ADR-018). `.ionapi` at-rest import/ACL
       (ADR-009) still TBD
 - [ ] Results history (reopen without reprocessing)
-- [ ] Live `tauri dev` RPC smoke (opens a window — owner to run locally)
+- [x] **Live `tauri dev` smoke — PASSED (driven end-to-end via screen control):**
+      backend spawn + ping; Settings (paths persisted across an app restart;
+      info-only refresh ran OAuth+MDP live); load + classify (matches CLI:
+      46 GLOBAL / 27 MIXED, 11 companies); category preset; compare; Results
+      grid incl. maintained-by (CCM111→CRS014) and a real degenerate-PK marker
+      (MNSCRE); drill-down; engine-rendered CSV save verified on disk.
+      **Found + fixed:** pool wedge under Tauri-spawned engine → canary +
+      serial fallback (ADR-019); cancel unresponsive while wedged → wait-loop
+      polling; worker leaks → shutdown(wait=True) on success; drill-down
+      buried under long tables → capped grid height + sticky header
 
 ### Phase 7 — Packaging + load test
 - [ ] Windows installer (priority)
@@ -175,6 +184,8 @@ Detail lives in `DECISIONS.md`; headlines here.
   `schema refresh --info-only`; result JSON gains `maintained_by`
 - 2026-07-04 ADR-018 → GUI exports engine-rendered (`render` RPC + `from_dict`);
   settings persisted via localStorage (paths only, never contents)
+- 2026-07-04 ADR-019 → pool liveness canary; wedged pool ⇒ sticky serial
+  fallback; cancel-responsive wait loop; no worker leaks
 
 ## Open questions / blockers
 
@@ -225,7 +236,15 @@ Detail lives in `DECISIONS.md`; headlines here.
 - **GUI polish round (ADR-018):** Save JSON/CSV/MD engine-rendered (`render`
   RPC + `contract.from_dict` — the groundwork for results history), settings
   persisted across launches, "Update table info (fast)" button, program-aware
-  results search. Engine **148 tests**; cargo + tsc/vite clean.
+  results search.
+- **LIVE SMOKE PASSED (ADR-019):** the whole UI was driven end-to-end against
+  the real export via screen control — every view works. It caught and fixed
+  a real ship-blocker: the worker pool wedges when the engine is spawned by
+  Tauri (piped stdio/no console; fine from a terminal) → liveness canary +
+  sticky serial fallback + responsive cancel + no worker leaks. Root cause of
+  the wedge (Win + Py 3.14 spawn handshake under a no-console parent) is an
+  open follow-up — fixing it would restore GUI parallelism. Engine **150
+  tests**; cargo + tsc/vite clean.
 - **Diff is now table-parallel (ADR-013).** CLI `--workers` (0=auto default in
   the CLI, 1=serial, N=force). Proven byte-identical to serial on real data and
   ~3.5× at 6 workers on a scoped masters run. In-process retry means a flaky
