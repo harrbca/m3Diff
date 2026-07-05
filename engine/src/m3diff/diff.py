@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import logging
 import os
 import sys
 import time
@@ -49,6 +50,8 @@ from .source import ExportSource, open_export
 
 # Change-timestamp / bookkeeping fields that otherwise generate 100% noise (spec §3.3).
 DEFAULT_IGNORED_FIELDS: tuple[str, ...] = ("*lmdt", "*rgdt", "*rgtm", "*lmts", "*chno", "*chid")
+
+_log = logging.getLogger("m3diff.diff")
 
 MODE_INTRA = "intra"
 MODE_INTER = "inter"
@@ -290,10 +293,11 @@ def _index_side_a(
 def _diff_one(name: str, a: ExportSource, b: ExportSource, opt: CompareOptions) -> TableDiff | None:
     try:
         return _diff_one_pass(name, a, b, opt, force_heuristic=False)
-    except _DegeneratePkError:
+    except _DegeneratePkError as exc:
         # The metadata PK collided on real rows (a PK column blank on the wire).
         # Re-run this table on full-row identity — set-membership semantics that
         # cannot silently drop rows or report a false "modified".
+        _log.info("table %s: degenerate metadata PK (%s); retrying with full-row identity", name, exc)
         return _diff_one_pass(name, a, b, opt, force_heuristic=True)
 
 
@@ -615,7 +619,9 @@ def _resolve_future(
     """
     try:
         return future.result()  # type: ignore[attr-defined]
-    except Exception:
+    except Exception as exc:
+        _log.warning("worker failed for table %s (%s: %s); re-running in-process",
+                     name, type(exc).__name__, exc)
         return _diff_dispatch(name, a, b_source, a_names, b_names, options)
 
 
@@ -650,11 +656,17 @@ def _compare_parallel(
             # for this process and degrade to the serial path instead of hanging.
             global _pool_unavailable
             _pool_unavailable = True
+            _log.warning(
+                "worker pool failed the %.0fs liveness canary; falling back to "
+                "in-process serial for this and all later compares in this process",
+                _CANARY_GRACE,
+            )
             executor.shutdown(wait=False, cancel_futures=True)
             executor = None
             return _compare_serial(
                 scoped, a, b_source, a_names, b_names, options, total, progress, cancelled
             )
+        _log.info("pool live: %d workers over %d tables", workers, total)
 
         futures = {executor.submit(_worker_one, name): name for name in scoped}
         pending: set = set(futures)

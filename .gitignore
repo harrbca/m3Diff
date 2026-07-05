@@ -53,3 +53,8 @@ release/
 *.swp
 .DS_Store
 Thumbs.db
+
+# packaging build outputs (ADR-021)
+.venv-build/
+.pyinstaller-work/
+desktop/src-tauri/binaries/

@@ -144,11 +144,23 @@ Check items as they land. Each feature ships with tests (see spec §6.3).
       buried under long tables → capped grid height + sticky header
 
 ### Phase 7 — Packaging + load test
-- [ ] Windows installer (priority)
+- [x] **PyInstaller sidecar (ADR-021):** onefile console `m3diff-engine.exe`
+      (11.7 MB, PyInstaller 6.21 on Py 3.14.3, httpx frozen in), built by
+      `scripts/build-sidecar.ps1` into `src-tauri/binaries/` (gitignored).
+      `freeze_support()` in entry.py; frozen parallel compare verified 0.8s.
+      Shell spawns the sidecar when present (CREATE_NO_WINDOW), dev python
+      otherwise; `M3DIFF_PYTHON` forces dev
+- [x] **Post-mortem logging (ADR-021):** `%APPDATA%/m3diff/logs/` — engine.log
+      (rotating; request lifecycle, durations, tracebacks, canary/degenerate
+      events), faulthandler.log (hard crashes), shell.log (spawn, engine
+      stderr, exit). `M3DIFF_LOG_LEVEL` for DEBUG
+- [ ] Windows installer (priority) — NSIS config in place (`targets: nsis`,
+      WebView2 embedBootstrapper, externalBin); first `tauri build` in flight
 - [ ] macOS / Linux (best-effort)
 - [ ] Performance validation vs spec §6.2 (full-tenant zips, local only)
 - [ ] README + usage docs
-- [ ] License finalized before any publish
+- [ ] License finalized before any publish; signing story for SmartScreen
+      noted (out of scope v1)
 
 ### Post-MVP (not now)
 - [ ] "Analyze with AI" over diff JSON
@@ -189,6 +201,9 @@ Detail lives in `DECISIONS.md`; headlines here.
 - 2026-07-04 ADR-020 → spawn-wedge ROOT CAUSE: stdin-pipe read in one thread
   deadlocks console-sharing child spawn from another (Win + Py 3.14); fix =
   workers get CREATE_NO_WINDOW; GUI parallelism restored (<8s vs ≥15s)
+- 2026-07-04 ADR-021 → packaging: PyInstaller onefile console sidecar +
+  CREATE_NO_WINDOW spawn + freeze_support; NSIS-only installer; post-mortem
+  logging (engine.log / faulthandler.log / shell.log)
 
 ## Open questions / blockers
 

@@ -701,3 +701,55 @@ the scoped shim.
   canary grace (a wedge cannot pass it). Suite 150 → 152.
 - Worker crash tracebacks now go to a hidden console rather than the parent's
   terminal — acceptable; BrokenProcessPool handling covers behavior.
+
+---
+
+## ADR-021 — Packaging (PyInstaller onefile sidecar + NSIS) and post-mortem logging
+
+- **Date:** 2026-07-04
+- **Status:** Accepted. Executes the shape fixed in ADR-001/012.
+
+**Context.** Phase 7: ship a Windows installer, and give the field a way to
+debug failures after the fact (the engine previously persisted **no** logs and
+error frames carried no tracebacks — the cp1252 bug was diagnosed only because
+the failure happened while a developer was watching).
+
+**Decisions.**
+- **Sidecar = PyInstaller onefile, console subsystem.** One 11.7 MB
+  ``m3diff-engine.exe`` doubles as the GUI backend (``serve``) and a standalone
+  CLI (``compare``/``classify`` from any terminal). The shell spawns it with
+  ``CREATE_NO_WINDOW`` — no console flash, and per ADR-020 the engine must
+  never share a console anyway. PyInstaller 6.21 handles Python 3.14.3; httpx
+  is frozen in so GUI schema refresh works. ``entry.py`` calls
+  ``multiprocessing.freeze_support()`` first — without it every spawned pool
+  worker would boot another CLI (fork bomb). Frozen parallel compare verified:
+  0.8s end-to-end including worker spawn.
+- **Sidecar resolution in the shell:** if ``m3diff-engine.exe`` exists next to
+  the app exe (where Tauri's ``externalBin`` places it), spawn it; else fall
+  back to ``python -m m3diff.cli serve`` from source (dev). ``M3DIFF_PYTHON``
+  forces the dev path. No tauri-plugin-shell dependency.
+- **Installer:** NSIS only (``targets: ["nsis"]``; MSI would drag in WiX), with
+  the WebView2 ``embedBootstrapper`` per ADR-001. Build pipeline:
+  ``scripts/build-sidecar.ps1`` (venv → PyInstaller → triple-suffixed binary)
+  then ``npm run tauri build``. Build outputs are gitignored.
+- **Logging** (all under ``%APPDATA%/m3diff/logs/``):
+  - ``engine.log`` — rotating (2 MB × 3), ``m3diff.*`` logger tree, enabled by
+    ``serve`` on real stdio (CLI behavior unchanged). Logs request lifecycle
+    with durations and summaries, full tracebacks on task failure (the UI
+    frame keeps the short message), canary fallbacks, worker retries, and
+    degenerate-PK fallbacks per table. ``.ionapi`` param values are redacted
+    to a basename; level via ``M3DIFF_LOG_LEVEL``.
+  - ``faulthandler.log`` — armed at serve start with a dedicated open file, so
+    hard crashes (access violations) leave a Python traceback.
+  - ``shell.log`` — written by the Rust shell: which engine it spawned, every
+    engine **stderr** line (PyInstaller bootstrap errors land there; in a
+    packaged GUI app inherited stderr goes nowhere), and engine exit.
+  - Logging failure degrades to no-op — it must never break a compare.
+
+**Consequences.**
+- "Send me the three files in ``%APPDATA%/m3diff/logs``" is now a complete
+  post-mortem request.
+- Onefile trade-off: ~1s unpack on first sidecar start per boot; acceptable.
+- Release artifact still needs a signing story (unsigned NSIS will trip
+  SmartScreen) — out of scope for v1, noted for any public distribution.
+- License must be finalized before publishing an installer (PROGRESS item).

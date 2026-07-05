@@ -18,8 +18,10 @@ dict → json/csv/md via the CLI's renderers), cancel.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -32,6 +34,23 @@ from .schema.cache import SchemaCache
 from .source import open_export
 
 _LONG_METHODS = ("compare", "classify", "schema_refresh", "render")
+
+_log = logging.getLogger("m3diff.rpc")
+
+
+def _loggable_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Params for the log line: paths are useful, secrets are not. The .ionapi
+    *path* is not itself a secret, but redact it to a basename anyway; and the
+    render method's result payload is far too large to log."""
+    out: dict[str, Any] = {}
+    for key, value in params.items():
+        if key == "ionapi" and isinstance(value, str):
+            out[key] = Path(value).name
+        elif key == "result":
+            out[key] = f"<result dict, {len(value.get('tables', {}))} tables>"
+        else:
+            out[key] = value
+    return out
 
 
 def _classification_to_dict(c: TableClassification) -> dict[str, Any]:
@@ -116,6 +135,8 @@ class RpcServer:
         thread.start()
 
     def _run_task(self, rid: Any, method: str, params: dict[str, Any], cancel: threading.Event) -> None:
+        started = time.monotonic()
+        _log.info("request id=%s method=%s params=%s", rid, method, _loggable_params(params))
         try:
             handler = {
                 "compare": self._do_compare,
@@ -125,9 +146,18 @@ class RpcServer:
             }[method]
             result = handler(rid, params, cancel)
             self._send({"id": rid, "type": "result", "result": result})
+            summary = result.get("summary") if isinstance(result, dict) else None
+            _log.info(
+                "done id=%s method=%s elapsed=%.1fs%s",
+                rid, method, time.monotonic() - started,
+                f" summary={summary}" if summary else "",
+            )
         except CompareCancelled:
+            _log.info("cancelled id=%s method=%s after %.1fs", rid, method, time.monotonic() - started)
             self._send({"id": rid, "type": "cancelled", "result": {"cancelled": True}})
         except Exception as exc:  # any task failure is reported, never crashes the server
+            # UI gets the short message; the log gets the full traceback.
+            _log.exception("failed id=%s method=%s after %.1fs", rid, method, time.monotonic() - started)
             self._send({"id": rid, "type": "error", "error": {"message": str(exc)}})
         finally:
             with self._cancels_lock:
@@ -226,11 +256,21 @@ def _reconfigure_utf8(stream: TextIO) -> None:
 
 def serve(inp: TextIO | None = None, out: TextIO | None = None) -> int:
     """Run the RPC server over the given streams (default stdin/stdout)."""
+    real_stdio = out is None and inp is None
     if out is None:
         out = sys.stdout
         _reconfigure_utf8(out)
     if inp is None:
         inp = sys.stdin
         _reconfigure_utf8(inp)
+    if real_stdio:  # the GUI's headless engine: log to file for post-mortems
+        from .log import setup_logging
+
+        log_dir = setup_logging()
+        _log.info(
+            "serve start version=%s python=%s frozen=%s log_dir=%s",
+            __version__, sys.version.split()[0], getattr(sys, "frozen", False), log_dir,
+        )
     RpcServer(out).run(inp)
+    _log.info("serve exit (stdin EOF)")
     return 0

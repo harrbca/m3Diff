@@ -234,4 +234,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Frozen exe (PyInstaller sidecar): a spawned pool worker re-executes this
+    # binary; freeze_support() diverts it into the worker loop instead of
+    # starting another CLI (which would fork-bomb). No-op when unfrozen.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     sys.exit(main())
