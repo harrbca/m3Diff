@@ -134,3 +134,52 @@ def test_tables_in_categories_no_mvx_uses_first_component():
         cache.upsert_table(_schema_cat("MDB", "SOMETBL", "MF"))  # alphabetically first
         cache.upsert_table(_schema_cat("MJP", "SOMETBL", "TF"))
         assert cache.tables_in_categories(["MF"]) == {"SOMETBL"}
+
+
+def test_maintained_by_roundtrip_and_info_update():
+    with SchemaCache() as cache:
+        schema = TableSchema("MVX", "OCUSMA", "MF", "Customer", (_col("OKCONO", ("00",)),),
+                             "t", maintained_by="CRS610")
+        cache.upsert_table(schema)
+        got = cache.get("OCUSMA", "MVX")
+        assert got is not None and got.maintained_by == "CRS610"
+        # info-only update touches metadata but not columns
+        assert cache.set_table_info("MVX", "OCUSMA", category="MF",
+                                    description="Customer", maintained_by="CRS999") is True
+        got = cache.get("OCUSMA", "MVX")
+        assert got.maintained_by == "CRS999"
+        assert got.column_names == ("OKCONO",)
+        # unknown table: no row updated
+        assert cache.set_table_info("MVX", "NOPE", category="", description="",
+                                    maintained_by="") is False
+
+
+def test_migration_adds_maintained_by_to_old_cache(tmp_path):
+    """A cache created before the column existed opens cleanly and reads ''."""
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE tables (
+            component TEXT NOT NULL, table_name TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+            fetched_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (component, table_name)
+        );
+        CREATE TABLE columns (
+            component TEXT NOT NULL, table_name TEXT NOT NULL, ordinal INTEGER NOT NULL,
+            name TEXT NOT NULL, data_type TEXT NOT NULL DEFAULT '', length INTEGER,
+            decimals INTEGER, edit_code TEXT NOT NULL DEFAULT '',
+            idx_list TEXT NOT NULL DEFAULT '', PRIMARY KEY (component, table_name, ordinal)
+        );
+        INSERT INTO tables VALUES ('MVX', 'MITMAS', 'MF', 'Item Master', 't');
+        INSERT INTO columns VALUES ('MVX', 'MITMAS', 0, 'MMCONO', 'String', 3, NULL, '', '00');
+        """
+    )
+    conn.commit()
+    conn.close()
+    with SchemaCache(db) as cache:
+        got = cache.get("MITMAS", "MVX")
+        assert got is not None
+        assert got.maintained_by == ""  # migrated column, empty default

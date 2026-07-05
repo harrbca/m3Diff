@@ -160,3 +160,42 @@ def test_refresh_reports_progress():
     with SchemaCache() as cache:
         refresh_schema(_client(http), cache, progress=lambda d, t, n: seen.append((d, t, n)))
     assert seen == [(1, 2, "A"), (2, 2, "B")]
+
+
+def test_list_tables_maps_maintained_by():
+    http = FakeHttp()
+    http.routes["getTables"] = [
+        {"tableName": "OCUSMA", "tableDescription": "MF: Customer", "tableComponent": "MVX",
+         "tableCategory": "MF", "tableMaintainedBy": "CRS610", "tablePgmHeading": "XOC1000"},
+        {"tableName": "OOTYPE", "tableDescription": "MF: CO types", "tableComponent": "MVX",
+         "tableCategory": "MF", "tableMaintainedBy": "OIS010"},
+        {"tableName": "XNOPGM", "tableDescription": "", "tableComponent": "MVX",
+         "tableCategory": "WF"},  # no maintainer named
+    ]
+    tables = _client(http).list_tables()
+    by_name = {t.table_name: t for t in tables}
+    assert by_name["OCUSMA"].maintained_by == "CRS610"
+    assert by_name["OOTYPE"].maintained_by == "OIS010"
+    assert by_name["XNOPGM"].maintained_by == ""
+
+
+def test_refresh_table_info_updates_only_cached_tables():
+    from m3diff.schema import Column, TableSchema
+    from m3diff.schema.publisher import refresh_table_info
+
+    http = FakeHttp()
+    http.routes["getTables"] = [
+        {"tableName": "OCUSMA", "tableDescription": "MF: Customer", "tableComponent": "MVX",
+         "tableCategory": "MF", "tableMaintainedBy": "CRS610"},
+        {"tableName": "UNCACHED", "tableDescription": "", "tableComponent": "MVX",
+         "tableCategory": "TF", "tableMaintainedBy": "ZZZ999"},
+    ]
+    with SchemaCache() as cache:
+        cols = (Column("OKCONO", "String", 3, None, "", ("00",)),)
+        cache.upsert_table(TableSchema("MVX", "OCUSMA", "MF", "Customer", cols, "t"))
+        updated = refresh_table_info(_client(http), cache)
+        assert updated == 1  # UNCACHED skipped: no columns cached for it
+        got = cache.get("OCUSMA", "MVX")
+        assert got.maintained_by == "CRS610"
+        assert got.column_names == ("OKCONO",)  # columns untouched
+        assert cache.get("UNCACHED", "MVX") is None

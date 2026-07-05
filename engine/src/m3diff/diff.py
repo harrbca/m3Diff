@@ -254,7 +254,10 @@ def _diff_one_pass(
         pk = resolve_pk(name, header_a, opt.cache)
         degenerate = False
         if force_heuristic and pk.source == "metadata":
-            pk = PrimaryKey(header_a.names, "heuristic", pk.component, pk.component_ambiguous)
+            pk = PrimaryKey(
+                header_a.names, "heuristic", pk.component, pk.component_ambiguous,
+                maintained_by=pk.maintained_by,
+            )
             degenerate = True
         # Only a metadata PK claims uniqueness; full-row identity treats exact
         # duplicate rows as one, which cannot recurse into another fallback.
@@ -360,6 +363,7 @@ def _build_table_diff(
         pk_source=pk.source,
         schema_component=pk.component,
         component_ambiguous=pk.component_ambiguous,
+        maintained_by=pk.maintained_by,
         schema_match=schema_match,
         rows_a=rows_a,
         rows_b=rows_b,

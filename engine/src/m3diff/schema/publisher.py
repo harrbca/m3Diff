@@ -46,6 +46,7 @@ class TableMeta:
     description: str
     component: str
     category: str
+    maintained_by: str = ""  # tableMaintainedBy: maintaining program (may be "")
 
 
 def _join(base: str, path: str) -> str:
@@ -158,6 +159,7 @@ class MetadataPublisherClient:
                 description=row.get("tableDescription", ""),
                 component=row.get("tableComponent", ""),
                 category=row.get("tableCategory", ""),
+                maintained_by=row.get("tableMaintainedBy", "") or "",
             )
             for row in self._get_list("/les/getTables", params)
         ]
@@ -218,11 +220,41 @@ def refresh_schema(
                 description=meta.description,
                 columns=tuple(columns),
                 fetched_at=fetched_at,
+                maintained_by=meta.maintained_by,
             )
         )
         if progress is not None:
             progress(i, total, meta.table_name)
     return total
+
+
+def refresh_table_info(
+    client: MetadataPublisherClient,
+    cache: SchemaCache,
+    *,
+    prefix: str | None = None,
+    progress: ProgressFn | None = None,
+) -> int:
+    """Update cached tables' list-endpoint metadata (category, description,
+    maintained-by) from a single ``getTables`` call — no per-table column
+    fetches. Returns how many cached tables were updated; tables not already
+    in the cache are skipped (they have no columns to diff with anyway).
+    """
+    tables = client.list_tables(prefix)
+    total = len(tables)
+    updated = 0
+    for i, meta in enumerate(tables, start=1):
+        if cache.set_table_info(
+            meta.component,
+            meta.table_name,
+            category=meta.category,
+            description=meta.description,
+            maintained_by=meta.maintained_by,
+        ):
+            updated += 1
+        if progress is not None:
+            progress(i, total, meta.table_name)
+    return updated
 
 
 def httpx_client(*, timeout: float = 30.0) -> HttpClient:

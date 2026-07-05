@@ -19,11 +19,12 @@ _MVX = "MVX"
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS tables (
-    component   TEXT NOT NULL,
-    table_name  TEXT NOT NULL,
-    category    TEXT NOT NULL DEFAULT '',
-    description TEXT NOT NULL DEFAULT '',
-    fetched_at  TEXT NOT NULL DEFAULT '',
+    component     TEXT NOT NULL,
+    table_name    TEXT NOT NULL,
+    category      TEXT NOT NULL DEFAULT '',
+    description   TEXT NOT NULL DEFAULT '',
+    fetched_at    TEXT NOT NULL DEFAULT '',
+    maintained_by TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (component, table_name)
 );
 CREATE TABLE IF NOT EXISTS columns (
@@ -53,7 +54,16 @@ class SchemaCache:
         self._conn = sqlite3.connect(self.path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA_DDL)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Bring a pre-existing cache file up to the current DDL (additive only)."""
+        cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(tables)")}
+        if "maintained_by" not in cols:
+            self._conn.execute(
+                "ALTER TABLE tables ADD COLUMN maintained_by TEXT NOT NULL DEFAULT ''"
+            )
 
     def upsert_table(self, schema: TableSchema) -> None:
         """Insert or replace one table's schema (and all its columns)."""
@@ -68,13 +78,14 @@ class SchemaCache:
                 (schema.component, schema.table_name),
             )
             conn.execute(
-                "INSERT INTO tables VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO tables VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     schema.component,
                     schema.table_name,
                     schema.category,
                     schema.description,
                     schema.fetched_at,
+                    schema.maintained_by,
                 ),
             )
             conn.executemany(
@@ -132,7 +143,22 @@ class SchemaCache:
             description=trow["description"],
             columns=columns,
             fetched_at=trow["fetched_at"],
+            maintained_by=trow["maintained_by"],
         )
+
+    def set_table_info(
+        self, component: str, table_name: str, *,
+        category: str, description: str, maintained_by: str,
+    ) -> bool:
+        """Update one cached table's list-endpoint metadata without touching its
+        columns (the cheap `--info-only` refresh). Returns False if not cached."""
+        cursor = self._conn.execute(
+            "UPDATE tables SET category = ?, description = ?, maintained_by = ? "
+            "WHERE component = ? AND table_name = ?",
+            (category, description, maintained_by, component, table_name),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
 
     def resolve(self, table_name: str) -> SchemaResolution:
         """Resolve a bare export table name to a schema, MVX-preferred (ADR-004)."""

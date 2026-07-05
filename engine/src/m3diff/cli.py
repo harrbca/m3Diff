@@ -133,7 +133,9 @@ def _default_schema_db() -> str:
 
 def _cmd_schema_refresh(args: argparse.Namespace) -> int:
     from .schema.ionapi import load_ionapi
-    from .schema.publisher import MetadataPublisherClient, PublisherError, httpx_client, refresh_schema
+    from .schema.publisher import (
+        MetadataPublisherClient, PublisherError, httpx_client, refresh_schema, refresh_table_info,
+    )
 
     db_path = args.schema_db or _default_schema_db()
     try:
@@ -147,8 +149,13 @@ def _cmd_schema_refresh(args: argparse.Namespace) -> int:
         print(f"\r[{done}/{total}] {name:<30}", end="", file=sys.stderr)
 
     with SchemaCache(db_path) as cache:
-        total = refresh_schema(client, cache, fetched_at=_now_iso(), progress=_progress)
-    print(f"\nrefreshed {total} tables into {db_path}", file=sys.stderr)
+        if args.info_only:
+            total = refresh_table_info(client, cache, progress=_progress)
+            print(f"\nupdated table info (category/maintained-by) for {total} tables in {db_path}",
+                  file=sys.stderr)
+        else:
+            total = refresh_schema(client, cache, fetched_at=_now_iso(), progress=_progress)
+            print(f"\nrefreshed {total} tables into {db_path}", file=sys.stderr)
     return 0
 
 
@@ -201,6 +208,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_refresh = schema_sub.add_parser("refresh", help="Refresh the schema cache from M3.")
     p_refresh.add_argument("--ionapi", required=True, help="Path to the .ionapi credential file.")
     p_refresh.add_argument("--schema-db", dest="schema_db", help="SQLite schema cache to write.")
+    p_refresh.add_argument("--info-only", dest="info_only", action="store_true",
+                           help="Only update category/description/maintained-by from the table "
+                                "list (one call) — no per-table column re-fetch.")
     p_refresh.set_defaults(func=_cmd_schema_refresh)
 
     return parser

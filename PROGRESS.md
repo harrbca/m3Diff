@@ -104,6 +104,10 @@ Check items as they land. Each feature ships with tests (see spec §6.3).
 - [x] `--category MF[,TF…]` scope from metadata categories (ADR-016); unions
       with `--tables`, requires `--schema-db`. Real export: MF=1,944 tables/92%
       of rows, TF=1,329/8%, WF+ST+SF=898/~0% (excludable noise)
+- [x] `maintained_by` (ADR-017): MDP's `tableMaintainedBy` persisted in the
+      cache (auto-migration), surfaced in result JSON, populated via
+      `schema refresh --info-only` (one call, no column re-fetch). Real cache:
+      982/5,381 tables named (OCUSMA→CRS610, OOTYPE→OIS010)
 - [x] `m3diff classify` (classification CSV + summary)
 - [ ] `m3diff schema refresh` — stubbed pending Phase 3b (MDP client)
 - [x] CLI and (eventual) GUI produce identical result JSON (byte-identical test)
@@ -112,9 +116,11 @@ Check items as they land. Each feature ships with tests (see spec §6.3).
 - [x] Tauri v2 shell over NDJSON-over-stdio (ADR-001); dev spawns `python -m
       m3diff.cli serve` via PYTHONPATH. PyInstaller **sidecar deferred to Phase 7**
 - [x] Upload + per-export summary (native file dialog + classify); drag-drop TBD
-- [x] Mode selection + table scope filter — prefix-glob preset for now; the
-      engine side of the MF-category preset (ADR-006) now exists (ADR-016:
-      `categories` in options/RPC); UI picker wiring still TBD
+- [x] Mode selection + table scope filter — **category preset wired** (ADR-006
+      done end-to-end): Scope view has a "By metadata category" preset with
+      MF/TF/WF/ST/SF checkboxes (MF default), warns when no schema DB is set;
+      custom globs retained. Drill-down shows the maintaining-program chip
+      (ADR-017) and a `pk_degenerate` warning badge
 - [x] Progress reporting + cancel + per-table error tolerance (F5/F6, UI-wired)
 - [x] Results dashboard + table drill-down + row/field drill-down
 - [x] Export renderers JSON/CSV/Markdown in engine + CLI `--format`; UI has
@@ -161,6 +167,8 @@ Detail lives in `DECISIONS.md`; headlines here.
   load; engine exonerated; heavy validation moves to a healthy machine
 - 2026-07-04 ADR-016 → `--category` scope from metadata categories (MF/TF/WF/
   ST/SF), MVX-preferred, unions with `--tables`; engine half of ADR-006
+- 2026-07-04 ADR-017 → persist + surface `tableMaintainedBy` (OCUSMA→CRS610);
+  `schema refresh --info-only`; result JSON gains `maintained_by`
 
 ## Open questions / blockers
 
@@ -200,9 +208,14 @@ Detail lives in `DECISIONS.md`; headlines here.
 
 ### Session-end handoff (read this first in a fresh session)
 - **All committed, nothing lost.** Engine (138 tests) + desktop shell both build.
-- **Category scoping shipped (ADR-016):** `--category MF` etc. On the real
-  export every table categorizes: MF 1,944 (92% of rows), TF 1,329 (8%),
-  WF/ST/SF 898 (~0%, noise). GUI preset picker still TBD.
+- **Category scoping shipped end-to-end (ADR-016 + UI):** `--category MF` in
+  CLI/RPC and a "By metadata category" preset in the Scope view (MF default).
+  On the real export every table categorizes: MF 1,944 (92% of rows), TF 1,329
+  (8%), WF/ST/SF 898 (~0%, noise).
+- **Maintaining program shipped (ADR-017):** `maintained_by` in cache + result
+  JSON + drill-down chip; real cache populated via `schema refresh --info-only`
+  (982/5,381 tables named; OCUSMA→CRS610, OOTYPE→OIS010). Engine 144 tests;
+  frontend tsc+vite clean.
 - **Diff is now table-parallel (ADR-013).** CLI `--workers` (0=auto default in
   the CLI, 1=serial, N=force). Proven byte-identical to serial on real data and
   ~3.5× at 6 workers on a scoped masters run. In-process retry means a flaky

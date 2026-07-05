@@ -32,6 +32,7 @@ class PrimaryKey:
     source: str  # "metadata" | "heuristic"
     component: str | None = None
     component_ambiguous: bool = False
+    maintained_by: str | None = None  # maintaining program (MDP), e.g. "CRS610"
 
 
 def cono_column(header: TableHeader) -> str | None:
@@ -65,6 +66,9 @@ def resolve_pk(
         if cache is not None
         else SchemaResolution(schema=None, component=None, ambiguous=False)
     )
+    # Known even when the PK falls back to heuristic — the schema still names
+    # the maintaining program.
+    maintained_by = (resolution.schema.maintained_by or None) if resolution.schema else None
     if resolution.schema is not None:
         aligned = _align_to_header(resolution.schema.primary_key, header)
         if aligned:
@@ -73,12 +77,14 @@ def resolve_pk(
                 source="metadata",
                 component=resolution.component,
                 component_ambiguous=resolution.ambiguous,
+                maintained_by=maintained_by,
             )
     return PrimaryKey(
         columns=header.names,
         source="heuristic",
         component=resolution.component,
         component_ambiguous=resolution.ambiguous,
+        maintained_by=maintained_by,
     )
 
 

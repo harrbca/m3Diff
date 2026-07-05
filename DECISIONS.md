@@ -538,3 +538,39 @@ category and are selectable only by name/glob.
 - WF/ST/SF exclusion is the practical win: ~29% of tables that should never be
   diffed no longer generate noise or wasted work.
 - Suite 130 → 138 (cache MVX-preference, union semantics, no-cache error, CLI).
+
+---
+
+## ADR-017 — Persist and surface the maintaining program (`tableMaintainedBy`)
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (additive contract change per ADR-005).
+
+**Context.** Owner asked whether the metadata can attribute tables to the M3
+program that maintains them (OCUSMA → CRS610, OOTYPE → OIS010). MDP's
+``getTables`` already returns ``tableMaintainedBy`` (documented in
+METADATA-PUBLISHER-NOTES.md §1a) — the original refresh simply didn't persist
+it. Verified live: both examples resolve exactly as expected.
+
+**Decision.** Store ``maintained_by`` on the cache's ``tables`` row (with an
+additive ALTER-TABLE migration for pre-existing caches), carry it through
+``TableSchema`` → ``resolve_pk`` → ``PrimaryKey`` → ``TableDiff`` →
+result JSON (``maintained_by``, null when unknown). Populate cheaply via
+``m3diff schema refresh --info-only`` — a single ``getTables`` call that
+updates category/description/maintained-by for already-cached tables without
+re-fetching any columns. The GUI drill-down shows it as a program chip.
+
+**Rationale.**
+- It's the natural triage hint: a drifted config table's fix lives in its
+  maintenance program — showing "CRS610" turns a diff row into an action.
+- Known even when the PK falls back to heuristic (the schema still names the
+  program), so it's carried on ``PrimaryKey`` independent of ``pk_source``.
+- ``--info-only`` exists because re-fetching 5,381 tables' columns to gain one
+  list-endpoint field is wasteful; the list call is a single request.
+
+**Consequences.**
+- Coverage is partial by nature: on real data 982 / 5,381 cached tables name a
+  maintainer — overwhelmingly the master/config tables, which is exactly the
+  set that benefits. Transaction tables (written by many programs) mostly don't.
+- Result JSON gains ``maintained_by`` (additive); TS types updated.
+- Suite 138 → 144.

@@ -59,6 +59,9 @@ class TableDiff:
     # True when the metadata PK collided on this export's rows (a PK column
     # blank on the wire) and the table fell back to full-row identity.
     pk_degenerate: bool = False
+    # Maintaining program from the schema metadata (e.g. OCUSMA → "CRS610"),
+    # None when unknown. Triage hint: where to fix a drifted table.
+    maintained_by: str | None = None
     error: str | None = None
 
 
@@ -137,6 +140,7 @@ def _table_to_dict(table: TableDiff) -> dict[str, Any]:
         "global_subset": table.global_subset,
         "modified_detail": table.modified_detail,
         "pk_degenerate": table.pk_degenerate,
+        "maintained_by": table.maintained_by,
         "error": table.error,
     }
 

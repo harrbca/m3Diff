@@ -29,10 +29,13 @@ class Column:
 class TableSchema:
     component: str  # e.g. "MVX" — part of identity (ADR-004)
     table_name: str
-    category: str  # "MF" | "TF" | "WF" | ""  (ADR-006 config-scope signal)
+    category: str  # "MF" | "TF" | "WF" | "ST" | "SF" | ""  (ADR-006/016 scope signal)
     description: str
     columns: tuple[Column, ...]  # in definition order
     fetched_at: str
+    # Maintaining program from MDP's tableMaintainedBy (e.g. OCUSMA → "CRS610",
+    # OOTYPE → "OIS010"); "" when the metadata doesn't name one.
+    maintained_by: str = ""
 
     @property
     def primary_key(self) -> tuple[str, ...]:
