@@ -74,6 +74,7 @@ export function Drilldown({ name, table, onClose }: Props) {
     <div className="drilldown">
       <div className="drill-head">
         <h3 className="mono">{name}</h3>
+        {table.description && <span className="muted small">{table.description}</span>}
         <button className="link" onClick={onClose}>
           close ✕
         </button>

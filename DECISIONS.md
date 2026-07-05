@@ -753,3 +753,39 @@ the failure happened while a developer was watching).
 - Release artifact still needs a signing story (unsigned NSIS will trip
   SmartScreen) — out of scope for v1, noted for any public distribution.
 - License must be finalized before publishing an installer (PROGRESS item).
+
+---
+
+## ADR-022 — Surface the table description in the result and results list
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (additive contract change per ADR-005).
+
+**Context.** Owner asked whether the schema's table description could show in
+the results screen's table list. It was already fetched and cached —
+MDP's ``getTables`` returns ``tableDescription`` (METADATA-PUBLISHER-NOTES.md
+§1a), persisted on the cache's ``tables`` row and returned by ``resolve()`` —
+but, unlike ``maintained_by`` (ADR-017), it was never threaded out of the cache
+into the diff result, so the GUI had nothing to show.
+
+**Decision.** Carry ``description`` along the exact path ADR-017 established for
+``maintained_by``: ``TableSchema`` (already had it) → ``resolve_pk`` →
+``PrimaryKey`` → ``TableDiff`` → result JSON (``description``, null when the
+table isn't in the schema cache). No cache/DDL change and no new fetch — the
+value is already stored; this is pure plumbing. The GUI renders it as a muted
+second line under the table name in the results list (and in the drill-down
+header), and includes it in the table search.
+
+**Rationale.**
+- Zero-cost win: the data was already on disk; only the contract and UI needed
+  it. Reuses ADR-017's plumbing verbatim rather than inventing a new channel.
+- Carried on ``PrimaryKey`` independent of ``pk_source``, like ``maintained_by``
+  — a heuristic-PK table still shows its description.
+
+**Consequences.**
+- Result JSON gains ``description`` (additive; ``from_dict`` defaults it to null
+  for older JSON). TS types updated; suite 155 → 157.
+- Column descriptions are *not* covered: MDP returns a per-column ``description``
+  (§1b) but the cache's ``columns`` table has no such field and ``get_columns``
+  drops it — capturing those would need a DDL change and a full column re-fetch.
+  Deferred until asked for.

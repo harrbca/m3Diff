@@ -423,6 +423,7 @@ def _build_table_diff(
         schema_component=pk.component,
         component_ambiguous=pk.component_ambiguous,
         maintained_by=pk.maintained_by,
+        description=pk.description,
         schema_match=schema_match,
         rows_a=rows_a,
         rows_b=rows_b,

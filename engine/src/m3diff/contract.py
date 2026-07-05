@@ -62,6 +62,9 @@ class TableDiff:
     # Maintaining program from the schema metadata (e.g. OCUSMA → "CRS610"),
     # None when unknown. Triage hint: where to fix a drifted table.
     maintained_by: str | None = None
+    # Table description from the schema metadata (e.g. "MF: Item master"),
+    # None when the table isn't in the schema cache.
+    description: str | None = None
     error: str | None = None
 
 
@@ -141,6 +144,7 @@ def _table_to_dict(table: TableDiff) -> dict[str, Any]:
         "modified_detail": table.modified_detail,
         "pk_degenerate": table.pk_degenerate,
         "maintained_by": table.maintained_by,
+        "description": table.description,
         "error": table.error,
     }
 
@@ -206,6 +210,7 @@ def _table_from_dict(d: dict[str, Any]) -> TableDiff:
         # .get: additive fields absent from result JSON written by older versions
         pk_degenerate=d.get("pk_degenerate", False),
         maintained_by=d.get("maintained_by"),
+        description=d.get("description"),
         error=d.get("error"),
     )
 

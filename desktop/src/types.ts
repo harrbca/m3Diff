@@ -64,6 +64,7 @@ export interface TableDiff {
   modified_detail: boolean;
   pk_degenerate: boolean;
   maintained_by: string | null;
+  description: string | null;
   error: string | null;
 }
 

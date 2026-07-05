@@ -104,6 +104,7 @@ table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.grid th, table.grid td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 table.grid th.num, table.grid td.num { text-align: right; }
 table.grid tbody tr { cursor: pointer; }
+.table-desc { margin-top: 2px; max-width: 32ch; font-weight: 400; white-space: normal; }
 table.grid tbody tr:hover { background: #f0f4fb; }
 table.grid tbody tr.sel { background: #e3ecfd; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }

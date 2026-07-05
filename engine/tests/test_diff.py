@@ -326,6 +326,29 @@ def test_maintained_by_none_without_schema():
     assert td.maintained_by is None
 
 
+# --- table description --------------------------------------------------------
+def test_description_flows_from_schema_to_result():
+    cache = SchemaCache()
+    columns = tuple(
+        Column(n.upper(), "String", None, None, "", ("00",) if n != "mmitds" else ())
+        for n in ("mmcono", "mmitno", "mmitds")
+    )
+    cache.upsert_table(
+        TableSchema("MVX", "MITMAS", "MF", "MF: Item master", columns, "t")
+    )
+    tables = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    result = _compare(tables, tables, mode="inter", cono_a="100", cono_b="100", cache=cache)
+    td = result.tables["MITMAS"]
+    assert td.description == "MF: Item master"
+    assert json.loads(to_json(result))["tables"]["MITMAS"]["description"] == "MF: Item master"
+
+
+def test_description_none_without_schema():
+    tables = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    td = _compare(tables, tables, mode="inter", cono_a="100", cono_b="100").tables["MITMAS"]
+    assert td.description is None
+
+
 def test_degenerate_pk_intra_mode_cono_collision():
     """Intra mode: masking CONO makes rows from the two companies collide only in
     the B stream if the same masked key repeats within one company — a plain

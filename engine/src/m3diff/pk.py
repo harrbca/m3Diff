@@ -33,6 +33,7 @@ class PrimaryKey:
     component: str | None = None
     component_ambiguous: bool = False
     maintained_by: str | None = None  # maintaining program (MDP), e.g. "CRS610"
+    description: str | None = None  # table description (MDP), e.g. "MF: Item master"
 
 
 def cono_column(header: TableHeader) -> str | None:
@@ -67,8 +68,9 @@ def resolve_pk(
         else SchemaResolution(schema=None, component=None, ambiguous=False)
     )
     # Known even when the PK falls back to heuristic — the schema still names
-    # the maintaining program.
+    # the maintaining program and describes the table.
     maintained_by = (resolution.schema.maintained_by or None) if resolution.schema else None
+    description = (resolution.schema.description or None) if resolution.schema else None
     if resolution.schema is not None:
         aligned = _align_to_header(resolution.schema.primary_key, header)
         if aligned:
@@ -78,6 +80,7 @@ def resolve_pk(
                 component=resolution.component,
                 component_ambiguous=resolution.ambiguous,
                 maintained_by=maintained_by,
+                description=description,
             )
     return PrimaryKey(
         columns=header.names,
@@ -85,6 +88,7 @@ def resolve_pk(
         component=resolution.component,
         component_ambiguous=resolution.ambiguous,
         maintained_by=maintained_by,
+        description=description,
     )
 
 

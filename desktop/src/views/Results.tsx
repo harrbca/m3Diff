@@ -45,7 +45,9 @@ export function ResultsView({ result }: Props) {
       .filter(([, td]) => (status === "all" ? true : td.status === status))
       .filter(
         ([name, td]) =>
-          name.toLowerCase().includes(q) || (td.maintained_by ?? "").toLowerCase().includes(q),
+          name.toLowerCase().includes(q) ||
+          (td.maintained_by ?? "").toLowerCase().includes(q) ||
+          (td.description ?? "").toLowerCase().includes(q),
       )
       .sort((a, b) => {
         const s = STATUS_ORDER.indexOf(a[1].status) - STATUS_ORDER.indexOf(b[1].status);
@@ -133,7 +135,10 @@ export function ResultsView({ result }: Props) {
           <tbody>
             {rows.map(([name, td]) => (
               <tr key={name} className={selected === name ? "sel" : ""} onClick={() => setSelected(name)}>
-                <td className="mono">{name}</td>
+                <td>
+                  <span className="mono">{name}</span>
+                  {td.description && <div className="table-desc muted small">{td.description}</div>}
+                </td>
                 <td>{td.class}</td>
                 <td>
                   <span className={`dot status-${td.status}`} /> {td.status}
