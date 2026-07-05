@@ -19,11 +19,11 @@ ADR-010) slots in later without changing callers.
 from __future__ import annotations
 
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .format.types import Row, TableHeader
 from .schema.cache import SchemaCache
-from .schema.models import SchemaResolution
+from .schema.models import SchemaResolution, TableSchema
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +34,9 @@ class PrimaryKey:
     component_ambiguous: bool = False
     maintained_by: str | None = None  # maintaining program (MDP), e.g. "CRS610"
     description: str | None = None  # table description (MDP), e.g. "MF: Item master"
+    # Column descriptions (MDP), keyed by the export's column casing (e.g.
+    # "mmitds" -> "Item description"); only columns with a non-empty description.
+    column_descriptions: dict[str, str] = field(default_factory=dict)
 
 
 def cono_column(header: TableHeader) -> str | None:
@@ -58,6 +61,23 @@ def _align_to_header(pk_columns: tuple[str, ...], header: TableHeader) -> tuple[
     return tuple(aligned)
 
 
+def _column_descriptions(schema: TableSchema, header: TableHeader) -> dict[str, str]:
+    """Map the schema's column descriptions onto the export's column casing.
+
+    Metadata columns are uppercase (``MMITDS``); export headers lowercase
+    (``mmitds``). Returns ``{export_name: description}`` for columns present in
+    the export that carry a non-empty description — so keys line up with the
+    field names in change rows.
+    """
+    by_lower = {name.lower(): name for name in header.names}
+    result: dict[str, str] = {}
+    for column in schema.columns:
+        export_name = by_lower.get(column.name.lower())
+        if export_name is not None and column.description:
+            result[export_name] = column.description
+    return result
+
+
 def resolve_pk(
     table_name: str, header: TableHeader, cache: SchemaCache | None = None
 ) -> PrimaryKey:
@@ -68,9 +88,10 @@ def resolve_pk(
         else SchemaResolution(schema=None, component=None, ambiguous=False)
     )
     # Known even when the PK falls back to heuristic — the schema still names
-    # the maintaining program and describes the table.
+    # the maintaining program, describes the table, and describes its columns.
     maintained_by = (resolution.schema.maintained_by or None) if resolution.schema else None
     description = (resolution.schema.description or None) if resolution.schema else None
+    col_desc = _column_descriptions(resolution.schema, header) if resolution.schema else {}
     if resolution.schema is not None:
         aligned = _align_to_header(resolution.schema.primary_key, header)
         if aligned:
@@ -81,6 +102,7 @@ def resolve_pk(
                 component_ambiguous=resolution.ambiguous,
                 maintained_by=maintained_by,
                 description=description,
+                column_descriptions=col_desc,
             )
     return PrimaryKey(
         columns=header.names,
@@ -89,6 +111,7 @@ def resolve_pk(
         component_ambiguous=resolution.ambiguous,
         maintained_by=maintained_by,
         description=description,
+        column_descriptions=col_desc,
     )
 
 

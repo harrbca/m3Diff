@@ -9,7 +9,7 @@ output, modulo the caller-supplied `generated_at` and file labels.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -65,6 +65,12 @@ class TableDiff:
     # Table description from the schema metadata (e.g. "MF: Item master"),
     # None when the table isn't in the schema cache.
     description: str | None = None
+    # Column descriptions (MDP) for this table's compared columns, keyed by the
+    # export's column casing (e.g. "mmitds" -> "Item description"). Attached only
+    # when there's field-level detail to annotate (status "modified"); empty
+    # otherwise. Lets the drill-down label change rows and keeps the JSON
+    # self-describing for downstream consumers (ADR-023).
+    column_descriptions: dict[str, str] = field(default_factory=dict)
     error: str | None = None
 
 
@@ -145,6 +151,7 @@ def _table_to_dict(table: TableDiff) -> dict[str, Any]:
         "pk_degenerate": table.pk_degenerate,
         "maintained_by": table.maintained_by,
         "description": table.description,
+        "column_descriptions": table.column_descriptions,
         "error": table.error,
     }
 
@@ -211,6 +218,7 @@ def _table_from_dict(d: dict[str, Any]) -> TableDiff:
         pk_degenerate=d.get("pk_degenerate", False),
         maintained_by=d.get("maintained_by"),
         description=d.get("description"),
+        column_descriptions=dict(d.get("column_descriptions") or {}),
         error=d.get("error"),
     )
 

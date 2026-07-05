@@ -182,4 +182,25 @@ def test_migration_adds_maintained_by_to_old_cache(tmp_path):
     with SchemaCache(db) as cache:
         got = cache.get("MITMAS", "MVX")
         assert got is not None
-        assert got.maintained_by == ""  # migrated column, empty default
+        assert got.maintained_by == ""  # migrated tables column, empty default
+        assert got.columns[0].description == ""  # migrated columns column, empty default
+
+
+def test_column_description_roundtrip():
+    schema = TableSchema(
+        component="MVX",
+        table_name="MITMAS",
+        category="MF",
+        description="Item Master",
+        columns=(
+            Column("MMCONO", "Decimal", 3, None, "", ("00",), "Company"),
+            Column("MMITNO", "String", 15, None, "", ("00",), "Item number"),
+            Column("MMITDS", "String", 30, None, "", (), "Item description"),
+        ),
+        fetched_at="t",
+    )
+    with SchemaCache() as cache:
+        cache.upsert_table(schema)
+        got = cache.get("MITMAS", "MVX")
+        assert got is not None
+        assert [c.description for c in got.columns] == ["Company", "Item number", "Item description"]

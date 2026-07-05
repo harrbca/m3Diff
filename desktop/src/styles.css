@@ -134,6 +134,7 @@ table.grid tbody tr.sel { background: #e3ecfd; }
 .changes { margin-top: 4px; margin-left: 12px; }
 .change { display: flex; gap: 8px; align-items: baseline; }
 .fname { min-width: 120px; color: var(--muted); }
+.fdesc { min-width: 140px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; color: var(--muted); font-size: 12px; }
 .old { color: var(--bad); text-decoration: line-through; }
 .new { color: var(--ok); }
 .arrow { color: var(--muted); }

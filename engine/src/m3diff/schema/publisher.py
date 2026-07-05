@@ -176,6 +176,7 @@ class MetadataPublisherClient:
                 decimals=_parse_int(row.get("decimals")),
                 edit_code=row.get("editCode", ""),
                 indexes=_parse_indexes(row.get("indexes", "")),
+                description=row.get("description", ""),
             )
             for row in rows
         ]

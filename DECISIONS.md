@@ -788,4 +788,50 @@ header), and includes it in the table search.
 - Column descriptions are *not* covered: MDP returns a per-column ``description``
   (§1b) but the cache's ``columns`` table has no such field and ``get_columns``
   drops it — capturing those would need a DDL change and a full column re-fetch.
-  Deferred until asked for.
+  Deferred until asked for. **Superseded by ADR-023.**
+
+---
+
+## ADR-023 — Capture column descriptions and embed them in the result
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (additive contract change per ADR-005). Closes the
+  deferral in ADR-022.
+
+**Context.** Follow-on to ADR-022: the drill-down shows each modified field by
+its raw M3 code (``mmitds``), which is opaque. MDP's ``getColumnsUsedByTable``
+already returns a per-column ``description`` (METADATA-PUBLISHER-NOTES.md §1b) in
+the *same* payload the refresh already fetches for the PK — ``get_columns`` was
+simply dropping it. So the descriptions are free to capture; the only real work
+is a channel to the UI.
+
+**Decision — capture.** Add ``Column.description``; parse it in ``get_columns``
+(no new network call). Persist it on the cache's ``columns`` row with an additive
+``ALTER TABLE`` migration (mirrors ADR-017's ``maintained_by`` migration). A full
+``m3diff schema refresh`` now stores it; ``--info-only`` does not (it never
+touches columns), so an existing cache shows nothing until re-refreshed.
+
+**Decision — surface (ratified by owner).** Embed rather than a GUI-only lazy
+RPC, keeping CLI and GUI result JSON identical (CLAUDE.md invariant) and the JSON
+self-describing for the future "Analyze with AI" feature. Carry the map on
+``PrimaryKey`` (built once in ``resolve_pk`` from the resolved schema, aligned to
+the export's column casing — so ``mmitds`` not ``MMITDS``), then onto
+``TableDiff.column_descriptions`` (``{column: description}``).
+
+**Scope guards (avoid JSON bloat).**
+- **Only ``status == "modified"`` tables** carry the map — they're the only ones
+  with field-level detail to annotate. The identical majority (1682 / 1944 on
+  real data) stay empty. Missing/error tables show only PKs, so also empty.
+- **Only compared columns** are included: bounded to ``compare_cols``, which
+  already excludes the masked CONO column and the ignored change-timestamp
+  fields — descriptions that could never label a visible change are dropped.
+
+**Consequences.**
+- Result JSON gains ``column_descriptions`` per table (additive; ``from_dict``
+  defaults ``{}``). Deterministic output holds — ``sort_keys`` orders the map.
+- Drill-down renders ``code — description`` on each modified field (italic label
+  + a title tooltip), falling back to the bare code when unknown.
+- TS types updated; suite 157 → 160.
+- Not yet surfaced: added/removed rows still show only the PK, so their columns
+  aren't annotated. If row-field display is added later, the map is already there
+  for modified; added/removed would want the same bounding revisited.

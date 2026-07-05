@@ -65,6 +65,7 @@ export interface TableDiff {
   pk_degenerate: boolean;
   maintained_by: string | null;
   description: string | null;
+  column_descriptions: Record<string, string>;
   error: string | null;
 }
 

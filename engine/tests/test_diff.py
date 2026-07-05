@@ -349,6 +349,45 @@ def test_description_none_without_schema():
     assert td.description is None
 
 
+# --- column descriptions ------------------------------------------------------
+def _desc_cache():
+    """MITMAS cache where mmcono and mmitds carry column descriptions."""
+    cache = SchemaCache()
+    descs = {"mmcono": "Company", "mmitds": "Item description"}
+    columns = tuple(
+        Column(
+            n.upper(), "String", None, None, "",
+            ("00",) if n in ("mmcono", "mmitno") else (),
+            descs.get(n, ""),
+        )
+        for n in ("mmcono", "mmitno", "mmitds")
+    )
+    cache.upsert_table(TableSchema("MVX", "MITMAS", "MF", "MF: Item master", columns, "t"))
+    return cache
+
+
+def test_column_descriptions_annotate_modified_fields():
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "OLD"}])}
+    b = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "NEW"}])}
+    result = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_desc_cache())
+    td = result.tables["MITMAS"]
+    assert td.status == "modified"
+    # mmitds is annotated; mmcono is excluded — the CONO field is masked out of
+    # the comparison, so its description would never label a change.
+    assert td.column_descriptions == {"mmitds": "Item description"}
+    assert json.loads(to_json(result))["tables"]["MITMAS"]["column_descriptions"] == {
+        "mmitds": "Item description"
+    }
+
+
+def test_column_descriptions_empty_on_identical_table():
+    tables = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    td = _compare(tables, tables, mode="inter", cono_a="100", cono_b="100",
+                  cache=_desc_cache()).tables["MITMAS"]
+    assert td.status == "identical"
+    assert td.column_descriptions == {}  # no field detail to annotate → not embedded
+
+
 def test_degenerate_pk_intra_mode_cono_collision():
     """Intra mode: masking CONO makes rows from the two companies collide only in
     the B stream if the same masked key repeats within one company — a plain
@@ -470,9 +509,11 @@ def test_from_dict_tolerates_older_json_without_additive_fields():
 
     tables = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
     d = to_dict(_compare(tables, tables, mode="inter", cono_a="100", cono_b="100"))
-    for td in d["tables"].values():  # simulate a result written before ADR-014/017
+    for td in d["tables"].values():  # simulate a result written before ADR-014/017/023
         del td["pk_degenerate"]
         del td["maintained_by"]
+        del td["column_descriptions"]
     rebuilt = from_dict(d)
     td = rebuilt.tables["MITMAS"]
     assert td.pk_degenerate is False and td.maintained_by is None
+    assert td.column_descriptions == {}

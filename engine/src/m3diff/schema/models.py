@@ -19,6 +19,7 @@ class Column:
     decimals: int | None
     edit_code: str
     indexes: tuple[str, ...]  # index codes this column belongs to, e.g. ("00","10")
+    description: str = ""  # column description (MDP), e.g. "Company"; "" when absent
 
     @property
     def is_pk(self) -> bool:

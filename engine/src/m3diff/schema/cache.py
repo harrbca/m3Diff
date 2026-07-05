@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS columns (
     decimals    INTEGER,
     edit_code   TEXT NOT NULL DEFAULT '',
     idx_list    TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (component, table_name, ordinal)
 );
 CREATE INDEX IF NOT EXISTS columns_by_table ON columns (table_name);
@@ -64,6 +65,11 @@ class SchemaCache:
             self._conn.execute(
                 "ALTER TABLE tables ADD COLUMN maintained_by TEXT NOT NULL DEFAULT ''"
             )
+        col_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(columns)")}
+        if "description" not in col_cols:
+            self._conn.execute(
+                "ALTER TABLE columns ADD COLUMN description TEXT NOT NULL DEFAULT ''"
+            )
 
     def upsert_table(self, schema: TableSchema) -> None:
         """Insert or replace one table's schema (and all its columns)."""
@@ -89,7 +95,7 @@ class SchemaCache:
                 ),
             )
             conn.executemany(
-                "INSERT INTO columns VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO columns VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         schema.component,
@@ -101,6 +107,7 @@ class SchemaCache:
                         col.decimals,
                         col.edit_code,
                         ",".join(col.indexes),
+                        col.description,
                     )
                     for ordinal, col in enumerate(schema.columns)
                 ],
@@ -133,6 +140,7 @@ class SchemaCache:
                 decimals=row["decimals"],
                 edit_code=row["edit_code"],
                 indexes=tuple(code for code in row["idx_list"].split(",") if code),
+                description=row["description"],
             )
             for row in crows
         )

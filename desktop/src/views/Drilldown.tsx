@@ -34,7 +34,7 @@ function RowList({ rows }: { rows: RowRef[] }) {
   );
 }
 
-function ModList({ rows }: { rows: ModRef[] }) {
+function ModList({ rows, descriptions }: { rows: ModRef[]; descriptions: Record<string, string> }) {
   const [limit, setLimit] = useState(PAGE);
   return (
     <>
@@ -45,7 +45,10 @@ function ModList({ rows }: { rows: ModRef[] }) {
             <div className="changes">
               {Object.entries(m.changes).map(([field, ch]) => (
                 <div key={field} className="change">
-                  <span className="fname mono">{field}</span>
+                  <span className="fname mono" title={descriptions[field] ?? ""}>
+                    {field}
+                  </span>
+                  {descriptions[field] && <span className="fdesc">{descriptions[field]}</span>}
                   <span className="old">{ch.a ?? "∅"}</span>
                   <span className="arrow">→</span>
                   <span className="new">{ch.b ?? "∅"}</span>
@@ -120,7 +123,7 @@ export function Drilldown({ name, table, onClose }: Props) {
       </div>
 
       <div className="tabbody">
-        {tab === "modified" && <ModList rows={table.modified} />}
+        {tab === "modified" && <ModList rows={table.modified} descriptions={table.column_descriptions} />}
         {tab === "added" && <RowList rows={table.added} />}
         {tab === "removed" && <RowList rows={table.removed} />}
       </div>

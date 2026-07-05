@@ -100,13 +100,15 @@ def test_get_columns_parses_types_and_indexes():
     http = FakeHttp()
     http.routes["/les/getColumnsUsedByTable/MITMAS/MVX"] = [
         {"columnName": "MMCONO", "dataType": "Decimal", "length": "3", "decimals": "",
-         "editCode": "4", "indexes": "00,01,10"},
+         "editCode": "4", "indexes": "00,01,10", "description": "Company"},
         {"columnName": "MMITDS", "dataType": "String", "length": "30", "indexes": ""},
     ]
     columns = _client(http).get_columns("MITMAS", "MVX")
     assert columns[0].length == 3 and columns[0].indexes == ("00", "01", "10")
     assert columns[0].is_pk is True
+    assert columns[0].description == "Company"
     assert columns[1].length == 30 and columns[1].indexes == () and columns[1].is_pk is False
+    assert columns[1].description == ""  # absent in payload -> empty
 
 
 def test_refresh_derives_pk_from_index_00():

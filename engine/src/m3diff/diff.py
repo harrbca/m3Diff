@@ -375,9 +375,10 @@ def _diff_one_pass(
                 removed_row: Row = {} if downgraded else value
                 acc.removed.append((key, removed_row))
 
+    col_desc = {c: pk.column_descriptions[c] for c in compare_cols if c in pk.column_descriptions}
     return _build_table_diff(
         name, pk, header_a, table_class, schema_match, rows_a, rows_b, acc, downgraded, opt,
-        pk_degenerate=degenerate,
+        pk_degenerate=degenerate, column_descriptions=col_desc,
     )
 
 
@@ -394,6 +395,7 @@ def _build_table_diff(
     opt: CompareOptions,
     *,
     pk_degenerate: bool = False,
+    column_descriptions: dict[str, str] | None = None,
 ) -> TableDiff:
     acc.added.sort(key=lambda e: _pk_sort_key(e[0]))
     acc.removed.sort(key=lambda e: _pk_sort_key(e[0]))
@@ -416,6 +418,11 @@ def _build_table_diff(
     else:
         status = "identical"
 
+    # Column descriptions annotate field-level changes, which only "modified"
+    # tables carry — so attach them there and nowhere else, keeping the identical
+    # majority lean in the result JSON.
+    col_desc = column_descriptions if (column_descriptions and status == "modified") else {}
+
     return TableDiff(
         table_class=table_class,
         pk=list(pk.columns),
@@ -424,6 +431,7 @@ def _build_table_diff(
         component_ambiguous=pk.component_ambiguous,
         maintained_by=pk.maintained_by,
         description=pk.description,
+        column_descriptions=col_desc,
         schema_match=schema_match,
         rows_a=rows_a,
         rows_b=rows_b,
