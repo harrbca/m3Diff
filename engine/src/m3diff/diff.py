@@ -18,7 +18,9 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import sys
 import time
+import types
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor
@@ -62,10 +64,50 @@ _CANARY_GRACE = 15.0
 
 # Sticky per-process flag: set when a canary times out, after which this
 # process never tries a pool again (only the first compare pays the grace
-# wait). Observed in the field: multiprocessing's spawn handshake wedges when
-# the parent was itself spawned with piped stdio and no console by the GUI
-# shell — the same code parallelizes fine from a terminal.
+# wait). Root cause of the wedge the canary guards against is fixed by
+# _patch_worker_console_flags below; the canary stays as a safety net.
 _pool_unavailable = False
+
+_CREATE_NO_WINDOW = 0x08000000
+_worker_flags_patched = False
+
+
+def _patch_worker_console_flags() -> None:
+    """Windows: start pool workers with CREATE_NO_WINDOW (own hidden console).
+
+    Root cause (ADR-020, minimal repro in the ADR): on Windows + CPython 3.14 a
+    blocking read on *piped stdin* in one thread deadlocks the multiprocessing
+    spawn handshake of a console-SHARING child created from another thread —
+    the child freezes attaching the parent's console before it executes any
+    Python. That is exactly the serve process's shape (main thread reads the
+    NDJSON stdin pipe; compares run on a task thread). Children given their own
+    console lifecycle start normally, so add CREATE_NO_WINDOW to the worker
+    CreateProcess call.
+
+    The patch is surgical: ``popen_spawn_win32`` gets a shim module whose
+    ``CreateProcess`` ORs the flag in — the real ``_winapi`` used by
+    ``subprocess`` and everyone else is untouched. Idempotent; a failure leaves
+    things unpatched (the liveness canary still protects correctness then).
+    """
+    global _worker_flags_patched
+    if _worker_flags_patched or sys.platform != "win32":
+        return
+    try:
+        import _winapi
+        import multiprocessing.popen_spawn_win32 as psw
+
+        original = psw._winapi.CreateProcess
+
+        def _create_process_no_window(app, cmd, pattr, tattr, inherit, flags, env, cwd, si):
+            return original(app, cmd, pattr, tattr, inherit, flags | _CREATE_NO_WINDOW, env, cwd, si)
+
+        shim = types.ModuleType("m3diff._winapi_no_window_shim")
+        shim.__dict__.update(_winapi.__dict__)
+        shim.CreateProcess = _create_process_no_window
+        psw._winapi = shim
+        _worker_flags_patched = True
+    except Exception:  # stdlib layout changed: stay unpatched, canary covers us
+        pass
 
 
 class CompareCancelled(Exception):
@@ -596,6 +638,7 @@ def _compare_parallel(
 
     results: dict[str, TableDiff] = {}
     done_count = 0
+    _patch_worker_console_flags()  # ADR-020: pre-empt the console-attach wedge
     executor: ProcessPoolExecutor | None = ProcessPoolExecutor(
         max_workers=workers,
         initializer=_init_worker,

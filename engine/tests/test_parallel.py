@@ -8,6 +8,8 @@ serialized results against a serial run.
 from __future__ import annotations
 
 import io
+import os
+import sys
 import zipfile
 
 import pytest
@@ -269,6 +271,89 @@ def test_canary_timeout_falls_back_to_serial_and_sticks(tmp_path, monkeypatch):
     # ...and the sticky flag short-circuits worker resolution immediately.
     opt = CompareOptions(mode="inter", cono_a="100", cono_b="100", workers=8)
     assert _resolve_workers(opt, 10, open_export(a), open_export(b)) == 1
+
+
+# --- worker console flags (the ADR-020 wedge fix) ------------------------------
+def test_worker_console_flag_patch_is_applied_and_surgical():
+    if sys.platform != "win32":
+        pytest.skip("Windows-only spawn behavior")
+    import _winapi
+    import multiprocessing.popen_spawn_win32 as psw
+
+    from m3diff.diff import _patch_worker_console_flags
+
+    _patch_worker_console_flags()
+    # popen_spawn_win32 sees the shim; the real _winapi is untouched.
+    assert psw._winapi.CreateProcess is not _winapi.CreateProcess
+    assert psw._winapi.CloseHandle is _winapi.CloseHandle
+    before = psw._winapi.CreateProcess
+    _patch_worker_console_flags()  # idempotent: no double-wrapping
+    assert psw._winapi.CreateProcess is before
+
+
+def test_serve_stdin_pipe_does_not_wedge_the_pool(tmp_path):
+    """Regression for the ADR-020 deadlock: a parallel compare requested over
+    the serve NDJSON stdin pipe must use a healthy pool. Before the fix the
+    spawn handshake wedged (children frozen attaching the parent's console
+    while the main thread blocked reading piped stdin) and only the >=15s
+    canary fallback produced a result — so a fast result proves the fix."""
+    if sys.platform != "win32":
+        pytest.skip("Windows-only spawn behavior")
+    import json
+    import subprocess
+    import sys as _sys
+    import time as _time
+    from pathlib import Path
+
+    import m3diff
+
+    tables = _side_a()
+    a_path = _write_zip(tmp_path / "a.zip", tables)
+    request = {
+        "id": 1,
+        "method": "compare",
+        "params": {
+            "mode": "intra", "a": a_path, "cono_a": "100", "cono_b": "100",
+            "workers": 2, "generated_at": "t",
+        },
+    }
+    env = dict(os.environ, PYTHONPATH=str(Path(m3diff.__file__).parents[1]))
+    t0 = _time.monotonic()
+    proc = subprocess.Popen(
+        [_sys.executable, "-m", "m3diff.cli", "serve"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, encoding="utf-8", env=env,
+    )
+    try:
+        proc.stdin.write(json.dumps(request) + "\n")
+        proc.stdin.flush()
+        result = None
+        deadline = _time.monotonic() + 30
+        while _time.monotonic() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            msg = json.loads(line)
+            if msg.get("type") == "result":
+                result = msg["result"]
+                break
+            if msg.get("type") == "error":
+                pytest.fail(f"serve returned error: {msg['error']}")
+        elapsed = _time.monotonic() - t0
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    assert result is not None, "no result frame from serve"
+    assert result["summary"]["tables_compared"] == len(tables)
+    # Healthy pool: a few seconds. Wedge -> canary fallback: >= 15s.
+    assert elapsed < 12, f"pool likely wedged (canary fallback): {elapsed:.1f}s"
 
 
 def test_cancel_during_worker_startup_is_prompt(tmp_path):

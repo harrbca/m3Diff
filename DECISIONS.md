@@ -644,4 +644,60 @@ both hanging (unacceptable in a GUI) and disabling parallelism everywhere
 - **Open (root cause):** why the spawn handshake wedges under a piped-stdio /
   no-console parent on Windows + Python 3.14 — filed as a follow-up
   investigation; a fix there would restore GUI parallelism.
+  **→ Resolved by ADR-020**; the canary stays as a safety net.
 - Suite 148 → 150.
+
+---
+
+## ADR-020 — Root cause of the spawn wedge; workers get CREATE_NO_WINDOW
+
+- **Date:** 2026-07-04
+- **Status:** Accepted. Closes ADR-019's open question.
+
+**Context.** ADR-019 mitigated a wedge whose cause was unknown. Bisection with
+a matrix of minimal probes (real serve under four console configurations; bare
+``ProcessPoolExecutor`` across thread × console-flag cells; a serve-*shaped*
+probe with ingredients added one at a time) isolated it exactly.
+
+**Root cause.** On Windows + CPython 3.14.3: **a blocking read on *piped
+stdin* in one thread deadlocks the multiprocessing spawn handshake of any
+console-**sharing** child created from another thread.** The child freezes
+while attaching the parent's console, before executing any Python (matching
+the empty py-spy stacks). Minimal repro pair: a process whose main thread
+loops ``for line in sys.stdin`` (stdin = pipe) while a daemon thread runs
+``ProcessPoolExecutor(...).submit(noop)`` → 100% wedge; the identical process
+with the main thread *sleeping* instead of reading → 0.2s success. This is
+precisely the serve process's shape (main thread reads the NDJSON pipe;
+compares run on task threads) — and why the CLI never wedged (its main thread
+runs the compare and is never mid-read on stdin). Console *presence* is
+necessary but not sufficient; DETACHED_PROCESS parents were healthy only
+because their children never attach a shared console. Likely a CPython or
+conhost bug — worth reporting upstream with the repro pair.
+
+**Decision.** Start pool workers with **CREATE_NO_WINDOW** so they get their
+own hidden console instead of attaching the parent's. Implemented as a
+surgical patch (``_patch_worker_console_flags``): ``popen_spawn_win32`` is
+given a shim module whose ``CreateProcess`` ORs the flag in — the real
+``_winapi`` used by ``subprocess`` and everything else is untouched.
+Idempotent, Windows-only, applied just before pool creation; if the stdlib
+layout ever changes the patch silently no-ops and the ADR-019 canary still
+protects correctness.
+
+**Rationale.** CREATE_NO_WINDOW over DETACHED_PROCESS: workers keep a valid
+(hidden) console for std handles — the more conservative change. Both were
+proven healthy in the matrix; sharing the parent console is the only wedge
+case. There is no public multiprocessing API for worker creation flags, hence
+the scoped shim.
+
+**Consequences.**
+- The exact previously-wedged configs (piped stdio, with/without console) all
+  complete in **0.7s vs 15.5s** (canary fallback) — verified via the repro
+  matrix AND live in the GUI (ST-category compare: results in <8s, previously
+  ≥15s serial-only).
+- GUI compares regain full parallelism; ADR-019's canary + sticky fallback and
+  the in-process retry (ADR-013) remain as layered safety nets.
+- Regression tests: patch applied-and-surgical (shim only, idempotent), and an
+  end-to-end serve-over-pipes compare asserting completion well under the
+  canary grace (a wedge cannot pass it). Suite 150 → 152.
+- Worker crash tracebacks now go to a hidden console rather than the parent's
+  terminal — acceptable; BrokenProcessPool handling covers behavior.

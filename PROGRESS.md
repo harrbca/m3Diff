@@ -186,6 +186,9 @@ Detail lives in `DECISIONS.md`; headlines here.
   settings persisted via localStorage (paths only, never contents)
 - 2026-07-04 ADR-019 → pool liveness canary; wedged pool ⇒ sticky serial
   fallback; cancel-responsive wait loop; no worker leaks
+- 2026-07-04 ADR-020 → spawn-wedge ROOT CAUSE: stdin-pipe read in one thread
+  deadlocks console-sharing child spawn from another (Win + Py 3.14); fix =
+  workers get CREATE_NO_WINDOW; GUI parallelism restored (<8s vs ≥15s)
 
 ## Open questions / blockers
 
@@ -240,11 +243,16 @@ Detail lives in `DECISIONS.md`; headlines here.
 - **LIVE SMOKE PASSED (ADR-019):** the whole UI was driven end-to-end against
   the real export via screen control — every view works. It caught and fixed
   a real ship-blocker: the worker pool wedges when the engine is spawned by
-  Tauri (piped stdio/no console; fine from a terminal) → liveness canary +
-  sticky serial fallback + responsive cancel + no worker leaks. Root cause of
-  the wedge (Win + Py 3.14 spawn handshake under a no-console parent) is an
-  open follow-up — fixing it would restore GUI parallelism. Engine **150
-  tests**; cargo + tsc/vite clean.
+  Tauri → liveness canary + sticky serial fallback + responsive cancel + no
+  worker leaks.
+- **WEDGE ROOT-CAUSED AND FIXED (ADR-020):** bisected to a minimal repro —
+  on Win + CPython 3.14.3, a blocking read on piped stdin in one thread
+  deadlocks the spawn handshake of console-sharing children created from
+  another thread (child freezes attaching the parent console, pre-Python).
+  Fix: workers spawn with CREATE_NO_WINDOW via a surgical popen_spawn_win32
+  shim. Repro matrix went 15.5s-fallback → 0.7s across all configs; verified
+  live in the GUI (<8s, parallel). Upstream-report-worthy (CPython/conhost);
+  the minimal repro pair is described in ADR-020. Engine **152 tests**.
 - **Diff is now table-parallel (ADR-013).** CLI `--workers` (0=auto default in
   the CLI, 1=serial, N=force). Proven byte-identical to serial on real data and
   ~3.5× at 6 workers on a scoped masters run. In-process retry means a flaky
