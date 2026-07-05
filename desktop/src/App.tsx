@@ -159,29 +159,34 @@ export default function App() {
         </div>
       )}
 
-      <main className="content">
-        {step === "upload" && (
-          <UploadView
-            exportA={exportA}
-            exportB={exportB}
-            onLoad={loadExport}
-            onClear={(side) => (side === "a" ? setExportA(null) : setExportB(null))}
-            onNext={() => setStep("scope")}
-          />
-        )}
-        {step === "scope" && exportA && (
-          <ScopeView
-            exportA={exportA}
-            exportB={exportB}
-            mode={mode}
-            onMode={setMode}
-            busy={busy != null}
-            hasSchemaDb={Boolean(settings.schemaDb)}
-            onRun={runCompare}
-          />
-        )}
-        {step === "results" && result && <ResultsView result={result} />}
-      </main>
+      {step === "results" && result ? (
+        // Full-bleed: the results workspace owns the viewport (its panes scroll
+        // internally), so it sits outside the padded, max-width .content shell.
+        <ResultsView result={result} />
+      ) : (
+        <main className="content">
+          {step === "upload" && (
+            <UploadView
+              exportA={exportA}
+              exportB={exportB}
+              onLoad={loadExport}
+              onClear={(side) => (side === "a" ? setExportA(null) : setExportB(null))}
+              onNext={() => setStep("scope")}
+            />
+          )}
+          {step === "scope" && exportA && (
+            <ScopeView
+              exportA={exportA}
+              exportB={exportB}
+              mode={mode}
+              onMode={setMode}
+              busy={busy != null}
+              hasSchemaDb={Boolean(settings.schemaDb)}
+              onRun={runCompare}
+            />
+          )}
+        </main>
+      )}
 
       {showSettings && (
         <SettingsView settings={settings} onChange={setSettings} onClose={() => setShowSettings(false)} />

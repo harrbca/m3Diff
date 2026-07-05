@@ -835,3 +835,46 @@ the export's column casing — so ``mmitds`` not ``MMITDS``), then onto
 - Not yet surfaced: added/removed rows still show only the PK, so their columns
   aren't annotated. If row-field display is added later, the map is already there
   for modified; added/removed would want the same bounding revisited.
+  *(Superseded by ADR-024: the workspace's added/removed tables now render full
+  row fields with code + description column headers.)*
+
+---
+
+## ADR-024 — Results workspace: docked master/detail with a persisted split
+
+- **Date:** 2026-07-05
+- **Status:** Accepted (GUI only; no contract change).
+
+**Context.** The original results screen was a padded, max-width page: metric
+cards, a capped-height table, and a drill-down *below* the table that had to be
+scrolled to. Owner reviewed it against mockups (iterated via Artifact) and asked
+for a denser, utilitarian tool sized for a QHD monitor, with the field name and
+description as separate leading columns in the detail view.
+
+**Decision.** Rebuild the results step as a full-bleed workspace:
+
+- **Toolbar** replaces the metric cards: mode/CONO context, a compact summary
+  ledger, filter + status select, split-orientation toggle, export buttons.
+- **Master/detail split**: results table in one pane, the drill-down docked in
+  the other — both visible at once. The divider drags to resize; orientation is
+  a user toggle (top/bottom ⇄ left/right). Both persist in localStorage
+  (`m3diff.splitMode`, `m3diff.splitRatio`), joining the existing settings-key
+  convention. Defaults: top/bottom, 55%.
+- **Results table**: severity bar down the left edge, squared status tags, a
+  colored `+/−/~` ledger, table description inline after the name, identical
+  rows dimmed. All columns always shown (side-dock scrolls horizontally).
+- **Detail dock**: dense key:value meta strip; **Modified** renders a 4-column
+  grid — Field (M3 code) · Description · Before·A(cono) · After·B(cono);
+  **Added/Removed** render full-row columnar tables whose headers pair the code
+  over the description (PK columns first, then first-seen order).
+- Styling is flat/hairline (no cards/shadows/pills), namespaced under `.ws`;
+  the dead pre-workspace results/drill-down CSS was removed (the Settings modal
+  keeps `.drill-head`).
+
+**Consequences.**
+- The drill-down modal is gone; selection drives the dock. A fresh result
+  clears the selection.
+- Results render outside the padded `.content` shell (full-bleed) — the other
+  steps keep the old chrome.
+- CLI/engine untouched; the workspace is a pure re-skin over the same result
+  JSON, so F14/F15 exports are unchanged.
