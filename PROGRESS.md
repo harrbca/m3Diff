@@ -101,6 +101,9 @@ Check items as they land. Each feature ships with tests (see spec §6.3).
 
 ### Phase 5 — CLI ✅ (schema refresh stubbed → 3b)
 - [x] `m3diff compare` (intra/inter/global) + scope filter, strict-null, no-mask-cono
+- [x] `--category MF[,TF…]` scope from metadata categories (ADR-016); unions
+      with `--tables`, requires `--schema-db`. Real export: MF=1,944 tables/92%
+      of rows, TF=1,329/8%, WF+ST+SF=898/~0% (excludable noise)
 - [x] `m3diff classify` (classification CSV + summary)
 - [ ] `m3diff schema refresh` — stubbed pending Phase 3b (MDP client)
 - [x] CLI and (eventual) GUI produce identical result JSON (byte-identical test)
@@ -109,8 +112,9 @@ Check items as they land. Each feature ships with tests (see spec §6.3).
 - [x] Tauri v2 shell over NDJSON-over-stdio (ADR-001); dev spawns `python -m
       m3diff.cli serve` via PYTHONPATH. PyInstaller **sidecar deferred to Phase 7**
 - [x] Upload + per-export summary (native file dialog + classify); drag-drop TBD
-- [x] Mode selection + table scope filter — prefix-glob preset for now; MF
-      category (ADR-006) is a follow-up (needs a schema-cache category lookup)
+- [x] Mode selection + table scope filter — prefix-glob preset for now; the
+      engine side of the MF-category preset (ADR-006) now exists (ADR-016:
+      `categories` in options/RPC); UI picker wiring still TBD
 - [x] Progress reporting + cancel + per-table error tolerance (F5/F6, UI-wired)
 - [x] Results dashboard + table drill-down + row/field drill-down
 - [x] Export renderers JSON/CSV/Markdown in engine + CLI `--format`; UI has
@@ -155,6 +159,8 @@ Detail lives in `DECISIONS.md`; headlines here.
   `pk_degenerate` flag (semantics awaiting owner ratification)
 - 2026-07-04 ADR-015 → "MITBAL segfault" = hardware memory corruption under
   load; engine exonerated; heavy validation moves to a healthy machine
+- 2026-07-04 ADR-016 → `--category` scope from metadata categories (MF/TF/WF/
+  ST/SF), MVX-preferred, unions with `--tables`; engine half of ADR-006
 
 ## Open questions / blockers
 
@@ -193,7 +199,10 @@ Detail lives in `DECISIONS.md`; headlines here.
 - Other caveats: httpx is the `[schema]` extra; ruff/mypy not installed here.
 
 ### Session-end handoff (read this first in a fresh session)
-- **All committed, nothing lost.** Engine (130 tests) + desktop shell both build.
+- **All committed, nothing lost.** Engine (138 tests) + desktop shell both build.
+- **Category scoping shipped (ADR-016):** `--category MF` etc. On the real
+  export every table categorizes: MF 1,944 (92% of rows), TF 1,329 (8%),
+  WF/ST/SF 898 (~0%, noise). GUI preset picker still TBD.
 - **Diff is now table-parallel (ADR-013).** CLI `--workers` (0=auto default in
   the CLI, 1=serial, N=force). Proven byte-identical to serial on real data and
   ~3.5× at 6 workers on a scoped masters run. In-process retry means a flaky

@@ -501,3 +501,40 @@ heavy m3diff workload, not a bug in the hash-downgrade path.
   verify (OCCT / Prime95 small-FFT AVX2; MemTest86 to rule RAM in/out), and an
   Intel RMA claim if degraded — 13th/14th-gen K SKUs carry an extended 5-year
   warranty for exactly this defect.
+
+---
+
+## ADR-016 — Category scoping: metadata table categories as a first-class scope filter
+
+- **Date:** 2026-07-04
+- **Status:** Accepted. Implements the engine half of ADR-006's preset.
+
+**Context.** The Metadata Publisher categorizes every table; the cache already
+stores it. Real tenant data (5,381 cached tables / 4,171 in the test export,
+100% category coverage): **MF** master files 1,944 tables / 92% of rows
+(business masters *and* system config — M3 has no separate "configuration"
+category), **TF** transaction files 1,329 / 8%, **WF/ST/SF** work, statistics
+and join-dynamic tables 898 / ~0% — pure noise for tenant comparison. Owner
+asked for master/config/transaction scoping.
+
+**Decision.** `CompareOptions.categories` / CLI `--category MF[,TF…]` / RPC
+`categories`. Resolution: `SchemaCache.tables_in_categories()`, taking each
+table's category from the same component `resolve()` would pick (MVX-preferred,
+ADR-004), case-insensitive. **Unions with `--tables`** (either selects a
+table); no filter at all still means everything. Category scoping without a
+cache raises (`--schema-db` required); tables absent from the cache have no
+category and are selectable only by name/glob.
+
+**Rationale.**
+- Union lets the preset compose: `--category MF` for masters, plus globs to
+  pull in specific extras; "config only" is expressible today as prefix globs
+  (`CSY*,CMN*,CRS*`) since config lives inside MF.
+- Erroring without a cache beats silently scoping to nothing.
+- MVX-preferred keeps category resolution consistent with PK resolution.
+
+**Consequences.**
+- The ADR-006 GUI preset is unblocked: a category picker (MF default) instead
+  of the current prefix-glob preset; UI wiring still TBD.
+- WF/ST/SF exclusion is the practical win: ~29% of tables that should never be
+  diffed no longer generate noise or wasted work.
+- Suite 130 → 138 (cache MVX-preference, union semantics, no-cache error, CLI).

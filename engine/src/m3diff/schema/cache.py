@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterable
 
 from .models import Column, SchemaResolution, TableSchema
 
@@ -144,6 +145,25 @@ class SchemaCache:
             component=chosen,
             ambiguous=len(components) > 1,
         )
+
+    def tables_in_categories(self, categories: Iterable[str]) -> set[str]:
+        """Table names whose category matches, MVX-preferred (ADR-006/016).
+
+        A table under several components takes its category from the same
+        component ``resolve()`` would choose: MVX when present, else the
+        alphabetically first. Category matching is case-insensitive.
+        """
+        wanted = {c.upper() for c in categories}
+        chosen: dict[str, tuple[str, str]] = {}  # name -> (component, category)
+        rows = self._conn.execute(
+            "SELECT table_name, component, category FROM tables ORDER BY table_name, component"
+        )
+        for name, component, category in rows:
+            prev = chosen.get(name)
+            # first row per name is components[0]; MVX overrides it (resolve()'s rule)
+            if prev is None or (component == _MVX and prev[0] != _MVX):
+                chosen[name] = (component, category)
+        return {name for name, (_, cat) in chosen.items() if cat.upper() in wanted}
 
     def table_count(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM tables").fetchone()[0])

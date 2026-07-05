@@ -141,6 +141,7 @@ class RpcServer:
                 cono_a=params.get("cono_a"),
                 cono_b=params.get("cono_b"),
                 tables=tuple(params["tables"]) if params.get("tables") else None,
+                categories=tuple(params["categories"]) if params.get("categories") else None,
                 ignored_fields=(
                     tuple(params["ignored_fields"])
                     if params.get("ignored_fields")

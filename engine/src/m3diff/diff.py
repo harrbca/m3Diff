@@ -75,6 +75,9 @@ class CompareOptions:
     cono_a: str | None = None
     cono_b: str | None = None
     tables: tuple[str, ...] | None = None  # names/globs; None = every table present
+    # Metadata categories to scope to (e.g. ("MF",) per ADR-006); requires a
+    # cache. Unions with ``tables``: a table is in scope if either selects it.
+    categories: tuple[str, ...] | None = None
     ignored_fields: tuple[str, ...] = DEFAULT_IGNORED_FIELDS
     null_equals_empty: bool = True
     mask_cono: bool = True
@@ -97,6 +100,25 @@ def _resolve_scope(patterns: tuple[str, ...] | None, names: Iterable[str]) -> li
             selected.update(n for n in all_names if fnmatch.fnmatchcase(n, pattern))
         elif pattern in all_names:
             selected.add(pattern)
+    return sorted(selected)
+
+
+def _scope_tables(options: CompareOptions, names: set[str]) -> list[str]:
+    """The in-scope table names: name/glob patterns ∪ metadata categories (ADR-016).
+
+    No filter at all means every table present. Category scoping needs the
+    schema cache (categories live there); tables absent from the cache have no
+    category and can only be selected by name/glob.
+    """
+    if options.tables is None and not options.categories:
+        return sorted(names)
+    selected: set[str] = set()
+    if options.tables is not None:
+        selected.update(_resolve_scope(options.tables, names))
+    if options.categories:
+        if options.cache is None:
+            raise ValueError("category scoping requires a schema cache (--schema-db)")
+        selected.update(options.cache.tables_in_categories(options.categories) & names)
     return sorted(selected)
 
 
@@ -609,7 +631,7 @@ def compare(
     b_source = b if b is not None else a
     a_names = set(a.table_names())
     b_names = set(b_source.table_names())
-    scoped = _resolve_scope(options.tables, a_names | b_names)
+    scoped = _scope_tables(options, a_names | b_names)
     total = len(scoped)
 
     workers = _resolve_workers(options, total, a, b_source)

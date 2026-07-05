@@ -63,6 +63,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             cono_a=args.cono_a,
             cono_b=args.cono_b,
             tables=_parse_tables(args.tables),
+            categories=_parse_tables(args.category),
             null_equals_empty=not args.strict_null,
             mask_cono=not args.no_mask_cono,
             cache=cache,
@@ -169,6 +170,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_compare.add_argument("--cono-a", dest="cono_a", help="Company on side A.")
     p_compare.add_argument("--cono-b", dest="cono_b", help="Company on side B.")
     p_compare.add_argument("--tables", help='Scope filter, e.g. "CSY*,MITMAS,OCUSMA".')
+    p_compare.add_argument("--category", help='Scope to metadata categories, e.g. "MF" or '
+                           '"MF,TF" (master/transaction/work/stats). Needs --schema-db; '
+                           "unions with --tables.")
     p_compare.add_argument("--schema-db", dest="schema_db", help="SQLite schema cache for PKs.")
     p_compare.add_argument("--out", help="Output file (default: stdout).")
     p_compare.add_argument("--format", choices=("json", "csv", "md"), default="json",

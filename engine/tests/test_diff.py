@@ -328,6 +328,50 @@ def test_heuristic_pk_degrades_to_set_membership():
     assert td.counts.added == 1 and td.counts.removed == 1
 
 
+# --- category scoping (ADR-006/016) -----------------------------------------
+def _two_category_cache():
+    """MITMAS categorized MF, OOHEAD categorized TF, in one cache."""
+    cache = _mm_cache()  # MITMAS, category MF
+    cols = tuple(
+        Column(n.upper(), "String", None, None, "", ("00",) if n != "mmitds" else ())
+        for n in ("mmcono", "mmitno", "mmitds")
+    )
+    cache.upsert_table(TableSchema("MVX", "OOHEAD", "TF", "CO header", cols, "2026-07-04"))
+    return cache
+
+
+def test_category_scope_selects_only_matching_tables():
+    tables = {
+        "MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}]),
+        "OOHEAD": (_MM, [{"mmcono": "100", "mmitno": "O1", "mmitds": "T"}]),
+    }
+    result = _compare(
+        tables, tables, mode="inter", cono_a="100", cono_b="100",
+        cache=_two_category_cache(), categories=("MF",),
+    )
+    assert set(result.tables) == {"MITMAS"}  # OOHEAD (TF) excluded
+
+
+def test_category_scope_unions_with_table_patterns():
+    tables = {
+        "MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}]),
+        "OOHEAD": (_MM, [{"mmcono": "100", "mmitno": "O1", "mmitds": "T"}]),
+        "ZZUNKN": (_MM, [{"mmcono": "100", "mmitno": "Z", "mmitds": "?"}]),  # not in cache
+    }
+    result = _compare(
+        tables, tables, mode="inter", cono_a="100", cono_b="100",
+        cache=_two_category_cache(), categories=("MF",), tables=("ZZ*",),
+    )
+    # MF picks MITMAS; the glob picks the uncached ZZUNKN; OOHEAD stays out.
+    assert set(result.tables) == {"MITMAS", "ZZUNKN"}
+
+
+def test_category_scope_without_cache_is_an_error():
+    tables = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    with pytest.raises(ValueError, match="schema cache"):
+        _compare(tables, tables, mode="inter", cono_a="100", cono_b="100", categories=("MF",))
+
+
 # --- serialization ----------------------------------------------------------
 def test_compare_honors_cancellation():
     tables = {

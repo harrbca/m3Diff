@@ -96,3 +96,41 @@ def test_empty_index_membership_roundtrips():
         assert schema is not None
         assert schema.columns[2].indexes == ()  # MMITDS is in no index
         assert schema.columns[0].indexes == ("00", "01")
+
+
+def _schema_cat(component: str, table: str, category: str) -> TableSchema:
+    return TableSchema(
+        component=component,
+        table_name=table,
+        category=category,
+        description=f"{category}: {table}",
+        columns=(_col("AACONO", ("00",)), _col("AAKEY", ("00",))),
+        fetched_at="2026-07-04T00:00:00Z",
+    )
+
+
+def test_tables_in_categories_basic_and_case_insensitive():
+    with SchemaCache() as cache:
+        cache.upsert_table(_schema_cat("MVX", "MITMAS", "MF"))
+        cache.upsert_table(_schema_cat("MVX", "OOHEAD", "TF"))
+        cache.upsert_table(_schema_cat("MVX", "AINVRO", "WF"))
+        assert cache.tables_in_categories(["MF"]) == {"MITMAS"}
+        assert cache.tables_in_categories(["mf", "tf"]) == {"MITMAS", "OOHEAD"}
+        assert cache.tables_in_categories(["ST"]) == set()
+
+
+def test_tables_in_categories_prefers_mvx_component():
+    """Same table, different category per component: the MVX row decides —
+    mirroring resolve()'s component choice (ADR-004)."""
+    with SchemaCache() as cache:
+        cache.upsert_table(_schema_cat("MJP", "CSYTAB", "TF"))  # non-MVX says TF
+        cache.upsert_table(_schema_cat("MVX", "CSYTAB", "MF"))  # MVX says MF
+        assert cache.tables_in_categories(["MF"]) == {"CSYTAB"}
+        assert cache.tables_in_categories(["TF"]) == set()
+
+
+def test_tables_in_categories_no_mvx_uses_first_component():
+    with SchemaCache() as cache:
+        cache.upsert_table(_schema_cat("MDB", "SOMETBL", "MF"))  # alphabetically first
+        cache.upsert_table(_schema_cat("MJP", "SOMETBL", "TF"))
+        assert cache.tables_in_categories(["MF"]) == {"SOMETBL"}

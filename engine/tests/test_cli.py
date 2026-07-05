@@ -99,6 +99,36 @@ def test_compare_tables_scope(tmp_path):
     assert set(parsed["tables"]) == {"MITMAS", "CSYTAB"}  # OCUSMA excluded by scope
 
 
+def test_compare_category_scope(tmp_path):
+    tables = {
+        "MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A"}]),
+        "OOHEAD": (_MM, [{"mmcono": "100", "mmitno": "O1"}]),
+    }
+    a = _write_zip(tmp_path / "a.zip", tables)
+    db_path = tmp_path / "schema.db"
+    with SchemaCache(db_path) as cache:
+        cols = tuple(Column(n, "String", None, None, "", ("00",)) for n in ("MMCONO", "MMITNO"))
+        cache.upsert_table(TableSchema("MVX", "MITMAS", "MF", "Item", cols, "t"))
+        cache.upsert_table(TableSchema("MVX", "OOHEAD", "TF", "CO header", cols, "t"))
+    out = tmp_path / "r.json"
+    code = main(
+        ["compare", "--mode", "intra", "--a", a, "--cono-a", "100", "--cono-b", "100",
+         "--category", "MF", "--schema-db", str(db_path), "--out", str(out), "--generated-at", "t"]
+    )
+    assert code == 0
+    parsed = json.loads(out.read_text(encoding="utf-8"))
+    assert set(parsed["tables"]) == {"MITMAS"}  # TF table excluded by category scope
+
+
+def test_compare_category_without_schema_db_errors(tmp_path):
+    a = _write_zip(tmp_path / "a.zip", {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A"}])})
+    code = main(
+        ["compare", "--mode", "intra", "--a", a, "--cono-a", "100", "--cono-b", "100",
+         "--category", "MF"]
+    )
+    assert code == 2  # ValueError surfaced as a CLI error, not a traceback
+
+
 def test_classify_writes_csv(tmp_path):
     tables = {
         "MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A"}, {"mmcono": "500", "mmitno": "B"}]),
