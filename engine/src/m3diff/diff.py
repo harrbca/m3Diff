@@ -313,10 +313,11 @@ def _diff_one_pass(
         pk = resolve_pk(name, header_a, opt.cache)
         degenerate = False
         if force_heuristic and pk.source == "metadata":
-            pk = PrimaryKey(
-                header_a.names, "heuristic", pk.component, pk.component_ambiguous,
-                maintained_by=pk.maintained_by,
-            )
+            # Fall back to full-row identity, but keep every schema-derived field
+            # (description, column_descriptions, maintained_by, component); only
+            # the key columns and source change. Rebuilding from scratch here is
+            # what dropped the description for degenerate-PK tables (ADR-022/023).
+            pk = replace(pk, columns=header_a.names, source="heuristic")
             degenerate = True
         # Only a metadata PK claims uniqueness; full-row identity treats exact
         # duplicate rows as one, which cannot recurse into another fallback.

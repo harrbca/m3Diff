@@ -403,6 +403,27 @@ def test_degenerate_pk_intra_mode_cono_collision():
     assert td.status == "identical"
 
 
+def test_degenerate_pk_preserves_schema_description_and_column_descriptions():
+    """A degenerate metadata PK falls back to full-row identity, but must keep the
+    schema-derived metadata — description and column descriptions (ADR-022/023).
+    Regression: the fallback used to rebuild the PK from scratch and drop them."""
+    # mmitno blank in both rows → the masked PK collapses to the same key → the
+    # metadata PK degenerates and the table retries on full-row identity.
+    a = {"MITMAS": (_MM, [
+        {"mmcono": "100", "mmitno": "", "mmitds": "X"},
+        {"mmcono": "100", "mmitno": "", "mmitds": "Y"},
+    ])}
+    b = {"MITMAS": (_MM, [
+        {"mmcono": "100", "mmitno": "", "mmitds": "X"},
+        {"mmcono": "100", "mmitno": "", "mmitds": "Z"},
+    ])}
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_desc_cache()).tables["MITMAS"]
+    assert td.pk_degenerate is True and td.pk_source == "heuristic"
+    assert td.description == "MF: Item master"
+    assert td.column_descriptions == {"mmitds": "Item description"}
+    assert td.status == "modified"  # full-row identity: the changed row is add+remove
+
+
 # --- heuristic fallback -----------------------------------------------------
 def test_heuristic_pk_degrades_to_set_membership():
     a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "OLD"}])}
