@@ -56,6 +56,9 @@ class TableDiff:
     truncated: bool  # embedded rows capped below the true counts
     global_subset: bool  # global mode: only the CONO-0 subset of a MIXED table
     modified_detail: bool  # False if downgraded to hash-only (huge table)
+    # True when the metadata PK collided on this export's rows (a PK column
+    # blank on the wire) and the table fell back to full-row identity.
+    pk_degenerate: bool = False
     error: str | None = None
 
 
@@ -133,6 +136,7 @@ def _table_to_dict(table: TableDiff) -> dict[str, Any]:
         "truncated": table.truncated,
         "global_subset": table.global_subset,
         "modified_detail": table.modified_detail,
+        "pk_degenerate": table.pk_degenerate,
         "error": table.error,
     }
 

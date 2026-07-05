@@ -263,6 +263,61 @@ def test_hash_downgrade_drops_field_detail_but_keeps_counts():
     assert td.modified[0].changes == {}  # no field-level detail once downgraded
 
 
+# --- degenerate metadata PK (blank PK column on the wire) --------------------
+def test_degenerate_pk_side_a_falls_back_to_full_row_identity():
+    """Two A rows share a masked key (as when a PK column is blank on the wire):
+    keying on the metadata PK would silently overwrite one row, so the table
+    must fall back to full-row identity and say so."""
+    a = {"MITMAS": (_MM, [
+        {"mmcono": "100", "mmitno": "A", "mmitds": "WH1"},
+        {"mmcono": "100", "mmitno": "A", "mmitds": "WH2"},  # same masked key (A)
+    ])}
+    b = {"MITMAS": (_MM, [
+        {"mmcono": "100", "mmitno": "A", "mmitds": "WH1"},
+        {"mmcono": "100", "mmitno": "A", "mmitds": "CHANGED"},
+    ])}
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
+    assert td.pk_degenerate is True
+    assert td.pk_source == "heuristic"
+    assert td.rows_a == 2 and td.rows_b == 2  # no rows silently dropped
+    # set membership: the changed row is add+remove, never a false "modified"
+    assert td.counts.modified == 0
+    assert td.counts.added == 1 and td.counts.removed == 1
+
+
+def test_degenerate_pk_side_b_only_also_falls_back():
+    a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    b = {"MITMAS": (_MM, [
+        {"mmcono": "100", "mmitno": "A", "mmitds": "W"},
+        {"mmcono": "100", "mmitno": "A", "mmitds": "OTHER"},  # B-side collision
+    ])}
+    td = _compare(a, b, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
+    assert td.pk_degenerate is True
+    assert td.counts.added == 1  # the extra B row is an add, not an overwrite
+
+
+def test_unique_metadata_pk_is_not_flagged_degenerate():
+    tables = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "W"}])}
+    td = _compare(tables, tables, mode="inter", cono_a="100", cono_b="100", cache=_mm_cache()).tables["MITMAS"]
+    assert td.pk_degenerate is False
+    assert td.pk_source == "metadata"
+
+
+def test_degenerate_pk_intra_mode_cono_collision():
+    """Intra mode: masking CONO makes rows from the two companies collide only in
+    the B stream if the same masked key repeats within one company — a plain
+    cross-company match must NOT be flagged degenerate."""
+    rows = [
+        {"mmcono": "500", "mmitno": "A", "mmitds": "W"},
+        {"mmcono": "100", "mmitno": "A", "mmitds": "W"},
+    ]
+    td = _compare(
+        {"MITMAS": (_MM, rows)}, None, mode="intra", cono_a="500", cono_b="100", cache=_mm_cache()
+    ).tables["MITMAS"]
+    assert td.pk_degenerate is False  # each side sees the key once
+    assert td.status == "identical"
+
+
 # --- heuristic fallback -----------------------------------------------------
 def test_heuristic_pk_degrades_to_set_membership():
     a = {"MITMAS": (_MM, [{"mmcono": "100", "mmitno": "A", "mmitds": "OLD"}])}

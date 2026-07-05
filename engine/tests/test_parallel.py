@@ -34,6 +34,7 @@ def _rows(pairs):
 def _side_a():
     return {
         "CIDMAS": (_MM, _rows([("F", "M")])),                 # identical
+        "DUPKEY": (_MM, _rows([("K", "V1"), ("K", "V2")])),   # degenerate metadata PK
         "MITMAS": (_MM, _rows([("A", "W"), ("B", "X")])),     # identical
         "MPDMAT": (_MM, _rows([("D", "Z"), ("E", "Q")])),     # E removed in B
         "OCUSMA": (_MM, _rows([("C", "Y")])),                 # modified in B
@@ -43,6 +44,7 @@ def _side_a():
 def _side_b():
     return {
         "CIDMAS": (_MM, _rows([("F", "M"), ("G", "NEW")])),   # G added
+        "DUPKEY": (_MM, _rows([("K", "V1"), ("K", "V3")])),   # degenerate + drifted
         "MITMAS": (_MM, _rows([("A", "W"), ("B", "X")])),     # identical
         "MPDMAT": (_MM, _rows([("D", "Z")])),                 # E removed
         "OCUSMA": (_MM, _rows([("C", "CHANGED")])),           # modified
@@ -140,15 +142,18 @@ def test_gate_explicit_override_honored_down_to_two_tables(tmp_path):
 def test_parallel_matches_serial_with_metadata_pk(tmp_path):
     a = _write_zip(tmp_path / "a.zip", _side_a())
     b = _write_zip(tmp_path / "b.zip", _side_b())
-    db = _write_schema_db(tmp_path / "schema.db", ("CIDMAS", "MITMAS", "MPDMAT", "OCUSMA"))
+    db = _write_schema_db(tmp_path / "schema.db", ("CIDMAS", "DUPKEY", "MITMAS", "MPDMAT", "OCUSMA"))
 
-    serial = to_json(_compare(a, b, db, workers=1))
+    serial_result = _compare(a, b, db, workers=1)
+    serial = to_json(serial_result)
     parallel = to_json(_compare(a, b, db, workers=2))
     assert parallel == serial  # byte-identical
 
     # ...and it is a real diff, not two empty runs that trivially match.
     assert '"status": "modified"' in serial
     assert '"CHANGED"' in serial
+    # the degenerate-PK fallback fired identically inside a worker process
+    assert serial_result.tables["DUPKEY"].pk_degenerate is True
 
 
 def test_parallel_matches_serial_with_heuristic_pk(tmp_path):

@@ -10,25 +10,26 @@ Last updated: 2026-07-04, by Watson (Claude Code session)
 
 ## Current status (one-liner)
 
-**Diff now runs table-parallel across processes** (ADR-013), serial-identical
-output, with in-process retry so one flaky worker can't sink a long run.
-Validated schema-keyed on real data: intra 100 vs 500, 11 metadata-keyed
-masters, **19.4s → 5.5s at 6 workers (~3.5×)**, byte-identical to serial. Engine
-now **126 tests**. Desktop shell still built (Tauri v2 + React, ADR-012); only
-packaging (Phase 7) and a live `tauri dev` smoke remain.
+**Diff is table-parallel (ADR-013) AND a silent-correctness bug is fixed
+(ADR-014):** a metadata PK column blank on the wire (MITBAL: `mbwhlo` empty on
+359,064/359,077 rows) made masked keys collide and silently overwrite rows —
+now detected, with an honest full-row-identity fallback flagged
+`pk_degenerate`. Hardware verdict is in (ADR-015): the i9 **corrupts memory
+under sustained load** — the old "MITBAL segfault" was hardware being stressed,
+the engine is exonerated, and heavy validation moves to a healthy machine.
+Engine **130 tests**. Only packaging (Phase 7) + a live `tauri dev` smoke remain.
 
 ## Next up (the 1–3 things to do next)
 
+- [ ] **Hardware first (owner, outside repo):** BIOS/microcode 0x12B+, OCCT /
+      Prime95 AVX2 stress + MemTest86, Intel RMA if degraded (5-yr extended
+      warranty on 13th/14th-gen K). Until then: no heavy compares on this box.
 - [ ] Phase 7 packaging on the shipping machine (confirm which machine):
       PyInstaller sidecar + NSIS/WebView2. Also: run `npm run tauri dev` to
       click through the live UI; MF-category scope preset (ADR-006).
-- [ ] Optional: exercise the parallel path at larger scope once hardware is
-      trusted — a full-tenant all-tables all-cores sweep is deliberately NOT run
-      yet (it is the max-load scenario in the reboot history). Scale up
-      gradually (--workers modest, then higher) and watch Event Viewer.
-- [ ] (Closed) The MITBAL segfault is treated as **hardware** (flaky i9), per
-      owner — not chased further. The parallel path's in-process retry also
-      degrades gracefully if a worker dies mid-run (ADR-013).
+- [ ] On a healthy machine: full-tenant all-tables parallel sweep (perf
+      validation vs spec §6.2) + survey how many tables report `pk_degenerate`
+      on real exports (informs whether the GUI needs a badge/filter for it).
 
 ---
 
@@ -90,6 +91,13 @@ Check items as they land. Each feature ships with tests (see spec §6.3).
       a glitched/dead worker. Tests: gate decisions, serial==parallel on-disk,
       corrupt-table tolerance across the process boundary, cancellation, retry
       seam (`test_parallel.py`, 12 tests).
+- [x] **Degenerate metadata PK detection + fallback (ADR-014):** a repeated
+      masked key (PK column blank on the wire) aborts the keyed pass and re-runs
+      the table on full-row identity; result flagged `pk_degenerate: true`
+      (additive contract field). Found via MITBAL on real data — previously
+      silently overwrote 329k rows and reported plausible-looking garbage.
+      Golden tests: A-side, B-side-only, non-degenerate unflagged, intra-mode
+      not misflagged, degenerate table through the parallel path.
 
 ### Phase 5 — CLI ✅ (schema refresh stubbed → 3b)
 - [x] `m3diff compare` (intra/inter/global) + scope filter, strict-null, no-mask-cono
@@ -143,6 +151,10 @@ Detail lives in `DECISIONS.md`; headlines here.
 - 2026-07-04 ADR-012 → Rust toolchain now; build shell locally, defer packaging
 - 2026-07-04 ADR-013 → diff table-parallel across processes; serial-identical
   output; in-process retry for flaky workers
+- 2026-07-04 ADR-014 → degenerate metadata PK ⇒ full-row fallback +
+  `pk_degenerate` flag (semantics awaiting owner ratification)
+- 2026-07-04 ADR-015 → "MITBAL segfault" = hardware memory corruption under
+  load; engine exonerated; heavy validation moves to a healthy machine
 
 ## Open questions / blockers
 
@@ -181,11 +193,23 @@ Detail lives in `DECISIONS.md`; headlines here.
 - Other caveats: httpx is the `[schema]` extra; ruff/mypy not installed here.
 
 ### Session-end handoff (read this first in a fresh session)
-- **All committed, nothing lost.** Engine (126 tests) + desktop shell both build.
+- **All committed, nothing lost.** Engine (130 tests) + desktop shell both build.
 - **Diff is now table-parallel (ADR-013).** CLI `--workers` (0=auto default in
   the CLI, 1=serial, N=force). Proven byte-identical to serial on real data and
   ~3.5× at 6 workers on a scoped masters run. In-process retry means a flaky
   worker (or a dead one) is re-run locally instead of aborting the whole compare.
+- **Silent-correctness bug fixed (ADR-014):** blank PK columns on the wire made
+  masked keys collide → rows silently overwritten → plausible-looking wrong
+  results (MITBAL: only 29,935 of 359,077 rows actually compared). Now: detect,
+  fall back to full-row identity, flag `pk_degenerate: true`. Owner should
+  ratify the semantics (it's a contract addition).
+- **HARDWARE VERDICT (ADR-015): this machine corrupts memory under sustained
+  load.** Four distinct impossible-type-confusion/access-violation failures in
+  four different code sites in one evening, all under load, plus 3× Kernel-Power
+  41 reboots the same day; 130-test suite and small runs always clean. Do NOT
+  run heavy compares here until BIOS microcode 0x12B+ / stress-verify / RMA.
+  Real-data numbers recorded this session (MITBAL counts etc.) carry an
+  asterisk; re-validate on a healthy machine.
 - **Schema cache BUILT:** `C:\Projects\m3Diff\schema.db`, 5,381 tables,
   MVX-preferred; PK resolution verified on real data (e.g. MITBAL →
   MBCONO/MBWHLO/MBITNO; CSYTAB resolves MVX, ambiguous). No need to re-download.

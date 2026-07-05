@@ -411,3 +411,93 @@ instead of aborting — useful given the segfault history on huge tables.
   scoped size; scale up deliberately once hardware is trusted.
 - **Windows `spawn`:** relies on the CLI/RPC being import-safe (`main()` guarded)
   so children don't re-execute — verified.
+
+---
+
+## ADR-014 — Degenerate metadata PK: detect collisions, fall back to full-row identity
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (implemented); **semantics awaiting owner ratification**
+  (contract addition + fallback behavior — flag, don't silently decide).
+
+**Context.** Found on real data: MITBAL's export carries `mbwhlo` (a PK column)
+**blank on 359,064 of 359,077 rows** for one company. The masked key
+`(mbwhlo, mbitno)` collapses to effectively `(mbitno)`: 29,935 distinct keys for
+359k rows. The A-side index silently overwrote colliding rows (last-wins), so
+`rows_a` said 359k but only 30k were compared; "modified" counted per-B-row
+against arbitrary survivors; and — the tell that exposed it — the hash-downgrade
+never fired (index stayed under the 200k threshold) so a >200k-row table
+reported `modified_detail: true`. The result JSON for such a table was silently
+wrong. Any table whose metadata PK isn't unique **in the export's actual data**
+(blank PK columns being the observed cause) had this failure mode.
+
+**Decision.** During indexing (metadata PKs only), a repeated masked key raises
+an internal `_DegeneratePkError`; side B detects repeats the same way via a key
+set. `_diff_one` catches it and **re-runs the table with full-row identity** —
+the existing heuristic semantics: set membership, add+remove instead of a
+possibly-false "modified", no rows silently dropped. The table is flagged
+`pk_degenerate: true` in the result JSON (additive contract change, free per
+ADR-005), with `pk_source: "heuristic"`.
+
+**Rationale.**
+- A PK that doesn't key the data is a lie; keying on it loses rows silently.
+  Full-row identity is the engine's existing honest degradation ("never a false
+  modified") — reuse it rather than invent a third semantics.
+- Detect-and-restart costs one aborted pass only for degenerate tables; clean
+  tables pay a dict-membership check per row.
+- Heuristic (full-row) keys deliberately do NOT raise on collision: a full-row
+  duplicate is a genuinely indistinguishable row, and raising would recurse.
+
+**Consequences.**
+- Golden tests: A-side collision, B-side-only collision, non-degenerate not
+  flagged, intra-mode cross-company match not misflagged, fallback across the
+  process boundary (parallel path). Suite 126 → 130.
+- `_one_sided` does not detect degeneracy (append-only, no keyed index → no
+  data loss); its lists may contain repeated masked keys. Acceptable for v1.
+- B-side detection holds a key set (~rows_b tuples) for metadata-PK tables —
+  bounded by the same scale as the A index.
+- The GUI can badge `pk_degenerate` tables ("compared by full row — export's PK
+  column(s) blank"); not yet wired.
+- Open question for owner: should a degenerate table *also* report which PK
+  column(s) were blank? (Diagnosable from added/removed rows; deferred.)
+
+---
+
+## ADR-015 — The "MITBAL segfault" verdict: hardware memory corruption under load
+
+- **Date:** 2026-07-04
+- **Status:** Accepted (diagnosis; hardware remediation is outside the repo).
+
+**Context.** A prior session recorded a segfault in `compare --schema-db` on
+MITBAL and deferred it pending a hardware check (the machine also spontaneously
+rebooted). Tonight's work reproduced a crash *and* explained the whole pattern.
+
+**Evidence.** All failures occurred **only under sustained heavy load**, each in
+a *different* place — the signature of memory corruption, not a code bug:
+access violation inside `hashlib.blake2b` (AVX2-heavy hot loop, faulthandler
+traceback captured); a one-off `'int' object is not an iterator` unpickling a
+worker result (never recurred); `TypeError: 'range_iterator' + int` in the row
+decoder; `AttributeError: 'function' object has no attribute 'name'` on a
+dataclass field list — the last two on back-to-back runs of the *same* probe
+over the same data. Plus **three Kernel-Power 41 dirty reboots the same day**
+(a userspace bug cannot reboot a machine) and a clean WHEA log. The 130-test
+suite and all small/short runs pass consistently.
+
+**Verdict.** The i9 corrupts memory under sustained load (pattern consistent
+with the well-known Raptor Lake voltage-degradation defect: AVX-heavy crashes,
+random type confusion, spontaneous resets). **The diff engine is exonerated** —
+the original "MITBAL segfault" was this hardware being reliably stressed by any
+heavy m3diff workload, not a bug in the hash-downgrade path.
+
+**Consequences.**
+- No code workaround (e.g., swapping blake2b for sha256) — it would mask a
+  hardware fault, not fix it, and blake2b is not at fault.
+- Heavy-load validation results from this machine carry an asterisk until the
+  hardware is remediated; byte-identical cross-checks that *passed* are
+  self-consistent evidence those particular runs were clean.
+- Full-tenant / all-cores performance validation (spec §6.2) moves to a healthy
+  machine (candidate: the Phase 7 shipping machine, still to be confirmed).
+- Owner to-do (outside repo): BIOS/microcode update (Intel 0x12B+), stress
+  verify (OCCT / Prime95 small-FFT AVX2; MemTest86 to rule RAM in/out), and an
+  Intel RMA claim if degraded — 13th/14th-gen K SKUs carry an extended 5-year
+  warranty for exactly this defect.

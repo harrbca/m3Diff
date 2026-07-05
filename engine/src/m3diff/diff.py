@@ -59,6 +59,16 @@ class CompareCancelled(Exception):
     """Raised when a compare is cancelled between tables (spec F5)."""
 
 
+class _DegeneratePkError(Exception):
+    """The metadata PK failed to uniquely key this export's rows.
+
+    Happens when a PK column is blank on the wire (seen in the field: MITBAL
+    exports with ``mbwhlo`` empty), collapsing the masked key so distinct rows
+    collide. Keying on it would silently overwrite rows and produce a wrong
+    diff — the table is retried with full-row identity instead.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class CompareOptions:
     mode: str
@@ -169,10 +179,13 @@ def _index_side_a(
     compare_cols: list[str],
     null_equals_empty: bool,
     threshold: int,
+    detect_collisions: bool,
 ) -> tuple[dict, bool, Counter, int]:
     """Index side A's in-scope rows. Returns (index, downgraded, cono_tally, rows_in_scope).
 
     ``index`` maps masked key -> Row (full mode) or -> signature bytes (downgraded).
+    With ``detect_collisions`` (metadata PKs), a repeated key means the PK does not
+    key this data — raises _DegeneratePkError rather than silently overwriting rows.
     """
     index: dict = {}
     downgraded = False
@@ -185,6 +198,8 @@ def _index_side_a(
             continue
         in_scope += 1
         key = masked_key(row, pk, drop)
+        if detect_collisions and key in index:
+            raise _DegeneratePkError(f"duplicate masked key {key!r}")
         if downgraded:
             index[key] = _signature(row, compare_cols, null_equals_empty)
         else:
@@ -196,6 +211,18 @@ def _index_side_a(
 
 
 def _diff_one(name: str, a: ExportSource, b: ExportSource, opt: CompareOptions) -> TableDiff | None:
+    try:
+        return _diff_one_pass(name, a, b, opt, force_heuristic=False)
+    except _DegeneratePkError:
+        # The metadata PK collided on real rows (a PK column blank on the wire).
+        # Re-run this table on full-row identity — set-membership semantics that
+        # cannot silently drop rows or report a false "modified".
+        return _diff_one_pass(name, a, b, opt, force_heuristic=True)
+
+
+def _diff_one_pass(
+    name: str, a: ExportSource, b: ExportSource, opt: CompareOptions, force_heuristic: bool
+) -> TableDiff | None:
     with a.open_table(name) as stream_a, b.open_table(name) as stream_b:
         header_a, rows_a_iter = read_table(stream_a)
         header_b, rows_b_iter = read_table(stream_b)
@@ -203,6 +230,13 @@ def _diff_one(name: str, a: ExportSource, b: ExportSource, opt: CompareOptions) 
         cono_field_a = cono_column(header_a)
         cono_field_b = cono_column(header_b)
         pk = resolve_pk(name, header_a, opt.cache)
+        degenerate = False
+        if force_heuristic and pk.source == "metadata":
+            pk = PrimaryKey(header_a.names, "heuristic", pk.component, pk.component_ambiguous)
+            degenerate = True
+        # Only a metadata PK claims uniqueness; full-row identity treats exact
+        # duplicate rows as one, which cannot recurse into another fallback.
+        detect = pk.source == "metadata"
         drop_a = frozenset({cono_field_a} - {None}) if opt.mask_cono else frozenset()
         drop_b = frozenset({cono_field_b} - {None}) if opt.mask_cono else frozenset()
 
@@ -218,6 +252,7 @@ def _diff_one(name: str, a: ExportSource, b: ExportSource, opt: CompareOptions) 
         index, downgraded, cono_tally, rows_a = _index_side_a(
             rows_a_iter, pk, drop_a, cono_field_a, opt.cono_a, opt.mode,
             compare_cols, opt.null_equals_empty, opt.hash_downgrade_threshold,
+            detect,
         )
         table_class = _classify(cono_tally, cono_field_a, sum(cono_tally.values()))
 
@@ -227,6 +262,7 @@ def _diff_one(name: str, a: ExportSource, b: ExportSource, opt: CompareOptions) 
 
         acc = _Accumulator()
         seen: set = set()
+        b_keys: set = set()  # B-side collision detection (metadata PKs only)
         rows_b = 0
         for row in rows_b_iter:
             cono = cono_of_row(row, cono_field_b)
@@ -234,6 +270,10 @@ def _diff_one(name: str, a: ExportSource, b: ExportSource, opt: CompareOptions) 
                 continue
             rows_b += 1
             key = masked_key(row, pk, drop_b)
+            if detect:
+                if key in b_keys:
+                    raise _DegeneratePkError(f"duplicate masked key {key!r} on side B")
+                b_keys.add(key)
             if key not in index:
                 acc.added.append((key, row))
                 continue
@@ -252,7 +292,8 @@ def _diff_one(name: str, a: ExportSource, b: ExportSource, opt: CompareOptions) 
                 acc.removed.append((key, removed_row))
 
     return _build_table_diff(
-        name, pk, header_a, table_class, schema_match, rows_a, rows_b, acc, downgraded, opt
+        name, pk, header_a, table_class, schema_match, rows_a, rows_b, acc, downgraded, opt,
+        pk_degenerate=degenerate,
     )
 
 
@@ -267,6 +308,8 @@ def _build_table_diff(
     acc: _Accumulator,
     downgraded: bool,
     opt: CompareOptions,
+    *,
+    pk_degenerate: bool = False,
 ) -> TableDiff:
     acc.added.sort(key=lambda e: _pk_sort_key(e[0]))
     acc.removed.sort(key=lambda e: _pk_sort_key(e[0]))
@@ -306,6 +349,7 @@ def _build_table_diff(
         truncated=truncated,
         global_subset=(opt.mode == MODE_GLOBAL and table_class == "MIXED"),
         modified_detail=not downgraded,
+        pk_degenerate=pk_degenerate,
         error=None,
     )
 
@@ -341,7 +385,8 @@ def _error_table(name: str, exc: Exception) -> TableDiff:
         table_class="", pk=[], pk_source="", schema_component=None, component_ambiguous=False,
         schema_match=False, rows_a=0, rows_b=0, status="error",
         counts=ChangeCounts(0, 0, 0), added=[], removed=[], modified=[],
-        truncated=False, global_subset=False, modified_detail=True, error=str(exc),
+        truncated=False, global_subset=False, modified_detail=True, pk_degenerate=False,
+        error=str(exc),
     )
 
 
