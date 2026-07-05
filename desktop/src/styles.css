@@ -142,3 +142,11 @@ table.grid tbody tr.sel { background: #e3ecfd; }
 .path-row input { flex: 1; }
 .refresh-row { display: flex; gap: 10px; align-items: center; }
 .check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+
+/* category scope picker (Scope view) */
+.cats { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
+.cat { display: flex; gap: 8px; align-items: baseline; font-size: 14px; }
+.cat input { margin-top: 2px; }
+
+/* maintaining-program chip (Drilldown) */
+.chip.pgm { background: #e8f0fe; color: #1a56b0; font-family: var(--mono, monospace); }

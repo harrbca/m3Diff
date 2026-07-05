@@ -62,7 +62,13 @@ export default function App() {
     }
   }
 
-  async function runCompare(params: { mode: Mode; conoA?: string; conoB?: string; tables?: string[] }) {
+  async function runCompare(params: {
+    mode: Mode;
+    conoA?: string;
+    conoB?: string;
+    tables?: string[];
+    categories?: string[];
+  }) {
     if (!exportA) return;
     setError("");
     setResult(null);
@@ -73,6 +79,7 @@ export default function App() {
       cono_a: params.conoA,
       cono_b: params.conoB,
       tables: params.tables && params.tables.length ? params.tables : undefined,
+      categories: params.categories && params.categories.length ? params.categories : undefined,
       ignored_fields: settings.ignoredFields.split(",").map((s) => s.trim()).filter(Boolean),
       schema_db: settings.schemaDb || undefined,
       null_equals_empty: settings.nullEqualsEmpty,
@@ -151,6 +158,7 @@ export default function App() {
             mode={mode}
             onMode={setMode}
             busy={busy != null}
+            hasSchemaDb={Boolean(settings.schemaDb)}
             onRun={runCompare}
           />
         )}

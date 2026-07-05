@@ -82,6 +82,11 @@ export function Drilldown({ name, table, onClose }: Props) {
       <div className="meta">
         <span className="chip">{table.class}</span>
         <span className={`chip status-${table.status}`}>{table.status}</span>
+        {table.maintained_by && (
+          <span className="chip pgm" title="Maintaining program (from M3 metadata)">
+            {table.maintained_by}
+          </span>
+        )}
         <span className="muted small">
           PK [{table.pk.join(", ") || "—"}] · {table.pk_source}
           {table.schema_component ? ` · ${table.schema_component}` : ""}
@@ -92,6 +97,11 @@ export function Drilldown({ name, table, onClose }: Props) {
         {!table.schema_match && <span className="note warn">schemas differ — compared on intersection</span>}
         {table.global_subset && <span className="note">global subset (CONO 0 only)</span>}
         {!table.modified_detail && <span className="note warn">large table — field detail dropped</span>}
+        {table.pk_degenerate && (
+          <span className="note warn">
+            PK not unique in this export (blank key column) — compared by full row
+          </span>
+        )}
         {table.truncated && <span className="note warn">rows truncated — see JSON/CSV for full detail</span>}
         {table.error && <span className="note bad">error: {table.error}</span>}
       </div>

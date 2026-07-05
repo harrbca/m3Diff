@@ -62,6 +62,8 @@ export interface TableDiff {
   truncated: boolean;
   global_subset: boolean;
   modified_detail: boolean;
+  pk_degenerate: boolean;
+  maintained_by: string | null;
   error: string | null;
 }
 
